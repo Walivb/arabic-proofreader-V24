@@ -462,12 +462,12 @@
 const META = Object.freeze({
   name: 'Arabic Proofreader Hybrid Engine',
   nameArabic: 'محرك التدقيق العربي الهجين — النسخة الاحترافية الشاملة',
-  version: '24.2.1',
-  edition: 'PRO-FINAL-V24.2.1',
+  version: '24.2.2',
+  edition: 'PRO-FINAL-V24.2.2',
   language: 'ar',
-  release: 'V24.2.1 PRO FINAL — إصلاح إزالة التكرارات وحسم التعارضات الإملائية المراجعة فوق V24.2',
+  release: 'V24.2.2 PRO FINAL — إصلاح إزالة التكرارات وحسم التعارضات الإملائية المراجعة فوق V24.2',
   stability: 'stable',
-  releaseDate: '2026-08-22',
+  releaseDate: '2026-08-23',
   governingPrinciple: 'عدم إفساد الجملة الصحيحة أهم من اكتشاف خطأ إضافي — توليدُ الاقتراح لا يعني قبولَه.',
   compat: Object.freeze({
     baseVersion: '20.0.0',
@@ -14593,7 +14593,7 @@ function runPROApiSanityChecks(){
   var sample='الطالب الذي نجح، والمعلم الذي حضر.';
   var long=_rLong(sample);
   // V19.0.0 FINAL: الفحص معلق على سلسلة التوافق مع 18.8.6 أو 18.9.0، ويسمح بالإصدارات اللاحقة
-  var lineageOk = ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0','21.0.0','22.0.0'].indexOf(META.version)!==-1 || (META.compat && ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0'].indexOf(META.compat.baseVersion)!==-1);
+  var lineageOk = ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0','21.0.0','22.0.0','23.0.0','24.0.0','24.1.0','24.2.0','24.2.1','24.2.2'].indexOf(META.version)!==-1 || (META.compat && ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0'].indexOf(META.compat.baseVersion)!==-1);
   return {version:META.version,valid:Boolean(lineageOk) && long.clauseCount===2 && long.relativeLinks.length===2,checks:{longContextClauseCount:long.clauseCount,relativeLinks:long.relativeLinks.length,lineage:lineageOk}};
 }
 
@@ -15072,6 +15072,12 @@ function analyze(input, options = {}) {
   context.v241VetoedFindings = v241.vetoed;
 
   const ranked = rankAndClassify(effectiveFindings, context.options, context);
+
+  // V24.2.2 — Final deterministic output guard. Earlier pipeline layers already
+  // deduplicate findings, but future supplemental layers and long-context batching
+  // can reintroduce identical span/replacement records. Preserve separate offsets.
+  ranked.visible = deduplicateFindings(ranked.visible);
+  ranked.suppressed = deduplicateFindings(ranked.suppressed);
 
   // V19.1.0 — SafeCorrectAll: «تصحيح الكل» لا يطبّق إلا المقطوع به.
   // القرار تقاطعٌ بين سياسة V19.0 وسياسة V19.1، فلا يتوسّع الأتمتة أبدًا.
@@ -20262,7 +20268,7 @@ function analyzeLongV24(input, options = {}) {
     rawCorrected.push(r.corrected);
   }
   const combinedCorrected = rawCorrected.join('');
-  const result = analyze(text, {opts, maxFindings: 0});
+  const result = analyze(text, {...opts, maxFindings: 0});
   // إعادة بناء النتيجة على أساس المعالجة المجزأة
   result.original = text;
   result.corrected = combinedCorrected;
@@ -20300,7 +20306,7 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
     }
   }
   return {
-    version: '24.0.0', total: V24_BENCHMARK_ADDITIONS.length,
+    version: META.version, total: V24_BENCHMARK_ADDITIONS.length,
     errors: totalErr, controls: totalCtl,
     caught: errCaught, falsePositives: fp,
     recall: totalErr ? errCaught / totalErr : 1,
@@ -20485,7 +20491,7 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
     version: '1.0', build: buildHtmlV24, webApp: buildWebAppHtmlV24
   }),
   analyzeLongV24,
-  V24_PRO: Object.freeze({version: '24.2.0', edition: 'PRO-FINAL-V24.2',
+  V24_PRO: Object.freeze({version: '24.2.2', edition: 'PRO-FINAL-V24.2.2',
     analyze: analyzePRO, validate: runFullSuiteV23,
     benchmark: runArabicProBenchmarkV23,
     benchmarkAdditions: runV24AdditionBenchmarkV24,
