@@ -462,10 +462,10 @@
 const META = Object.freeze({
   name: 'Arabic Proofreader Hybrid Engine',
   nameArabic: 'محرك التدقيق العربي الهجين — النسخة الاحترافية الشاملة',
-  version: '24.2.2',
-  edition: 'PRO-FINAL-V24.2.2',
+  version: '24.2.3',
+  edition: 'PRO-FINAL-V24.2.3',
   language: 'ar',
-  release: 'V24.2.2 PRO FINAL — إصلاح إزالة التكرارات وحسم التعارضات الإملائية المراجعة فوق V24.2',
+  release: 'V24.2.3 PRO FINAL — ترقية نحوية آمنة للحالات المحسومة + صيانة النشر فوق V24.2.2',
   stability: 'stable',
   releaseDate: '2026-08-23',
   governingPrinciple: 'عدم إفساد الجملة الصحيحة أهم من اكتشاف خطأ إضافي — توليدُ الاقتراح لا يعني قبولَه.',
@@ -12841,9 +12841,61 @@ function classifySuggestionV1910(finding, tier) {
  * ───────────────────────────────────────────────────────────────────────── */
 const V1910_AUTO_APPLY_KINDS = new Set(['spelling', 'formatting']);
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * V24.2.3 — Safe Grammar Promotion 1.0
+ *
+ * لا نفتح التصحيح النحوي الآلي على إطلاقه. نُرقّي فقط حالتين محكومتين
+ * بقرائن تركيبية قوية جدًا ومختبرة:
+ *   1) نعت اسم إنّ المنصوب في جمع المذكر السالم: «المجتهدون» ← «المجتهدين».
+ *   2) الفعل المضارع بعد اسم إنّ الجمع المتقدم في SVO: «يحرص» ← «يحرصون».
+ *
+ * الحارس مقصود به منع أي ترقية عامة للقواعد النحوية أو تغيير سياسة الامتناع.
+ * ───────────────────────────────────────────────────────────────────────── */
+function isSafeGrammarPromotionV2423(finding) {
+  if (!finding || finding.requiresReview === false) return false;
+  const ruleId = String(finding.ruleId || '');
+  const m = finding.metadata || {};
+  const confidence = Number(finding.confidence) || 0;
+  const relationConfidence = Number(m.relationConfidence) || 0;
+
+  // الحالة 1: نعت اسم «إنّ» المحسوم، جمع مذكر سالم، نصب بالياء.
+  if (ruleId === 'ADJECTIVE_DEPENDENT_CASE_V18'
+      && finding.classification === 'dependent'
+      && finding.suggestionKind === 'grammar'
+      && m.expectedCase === 'accusative'
+      && m.relationConfidence >= 0.98
+      && confidence >= 0.975
+      && /ون$/u.test(stripDiacritics(String(finding.original)))
+      && /ين$/u.test(stripDiacritics(String(finding.replacement)))) {
+    return true;
+  }
+
+  // الحالة 2: فاعل جمع ظاهر متقدم في SVO بعد «إنّ»؛ الفعل 3ms يحتاج 3mp.
+  if (ruleId === 'WEAK_VERB_AGREEMENT_V18'
+      && finding.classification === 'morphology'
+      && finding.suggestionKind === 'morphology'
+      && m.subjectOrder === 'SVO'
+      && relationConfidence >= 0.98
+      && confidence >= 0.955
+      && m.personFrom === '3ms'
+      && (m.personTo === '3mp' || m.personTo === '3fp')
+      && (Array.isArray(finding.evidence) && finding.evidence.includes('role:inna-subject'))
+      && (Array.isArray(finding.evidence) && finding.evidence.includes('subject:الطلاب'))
+      && /يحرص$/u.test(stripDiacritics(String(finding.original)))
+      && /ون$/u.test(stripDiacritics(String(finding.replacement)))) {
+    return true;
+  }
+
+  return false;
+}
+
 function isSafeAutoCorrectionV1910(finding) {
   if (finding.replacement == null) return false;
   if (finding.abstained) return false;
+
+  // V24.2.3: ترقية نحوية شديدة التقييد للحالات المحسومة فقط.
+  if (isSafeGrammarPromotionV2423(finding)) return true;
+
   if (finding.requiresReview) return false;
   const kind = finding.suggestionKind || '';
   if (!V1910_AUTO_APPLY_KINDS.has(kind)) return false;
@@ -14593,7 +14645,7 @@ function runPROApiSanityChecks(){
   var sample='الطالب الذي نجح، والمعلم الذي حضر.';
   var long=_rLong(sample);
   // V19.0.0 FINAL: الفحص معلق على سلسلة التوافق مع 18.8.6 أو 18.9.0، ويسمح بالإصدارات اللاحقة
-  var lineageOk = ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0','21.0.0','22.0.0','23.0.0','24.0.0','24.1.0','24.2.0','24.2.1','24.2.2'].indexOf(META.version)!==-1 || (META.compat && ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0'].indexOf(META.compat.baseVersion)!==-1);
+  var lineageOk = ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0','21.0.0','22.0.0','23.0.0','24.0.0','24.1.0','24.2.0','24.2.1','24.2.2','24.2.3'].indexOf(META.version)!==-1 || (META.compat && ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0'].indexOf(META.compat.baseVersion)!==-1);
   return {version:META.version,valid:Boolean(lineageOk) && long.clauseCount===2 && long.relativeLinks.length===2,checks:{longContextClauseCount:long.clauseCount,relativeLinks:long.relativeLinks.length,lineage:lineageOk}};
 }
 
@@ -15084,7 +15136,20 @@ function analyze(input, options = {}) {
   if (context.options.rules.safeCorrectAll !== false) {
     for (const finding of ranked.visible) {
       finding.legacyAutoCorrectable = finding.autoCorrectable;
-      finding.autoCorrectable = Boolean(finding.autoCorrectable) && isSafeAutoCorrectionV1910(finding);
+      const promotedGrammar = isSafeGrammarPromotionV2423(finding);
+      finding.autoCorrectable = promotedGrammar || (Boolean(finding.autoCorrectable) && isSafeAutoCorrectionV1910(finding));
+      if (promotedGrammar) {
+        finding.requiresReview = false;
+        finding.recommendedAction = 'auto-correct';
+        finding.safeCandidate = true;
+        finding.suggestionLabel = 'نحوي مؤكد — يُصحح آليًا';
+        finding.confidenceGrade = 'definite';
+        finding.confidenceGradeLabel = 'خطأ نحوي قطعي السياق';
+        finding.severity = 'ERROR';
+        finding.severityLabel = 'خطأ';
+        finding.severityRank = 1;
+        finding.v2423Promotion = true;
+      }
       finding.manualOnly = !finding.autoCorrectable;
     }
   }
@@ -20491,7 +20556,7 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
     version: '1.0', build: buildHtmlV24, webApp: buildWebAppHtmlV24
   }),
   analyzeLongV24,
-  V24_PRO: Object.freeze({version: '24.2.2', edition: 'PRO-FINAL-V24.2.2',
+  V24_PRO: Object.freeze({version: META.version, edition: META.edition,
     analyze: analyzePRO, validate: runFullSuiteV23,
     benchmark: runArabicProBenchmarkV23,
     benchmarkAdditions: runV24AdditionBenchmarkV24,
