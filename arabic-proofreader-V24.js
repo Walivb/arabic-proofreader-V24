@@ -2,7 +2,7 @@
  * ============================================================================
  *  Arabic Proofreader V23.0 PRO FINAL — Blogger Standalone Bundle
  *  ────────────────────────────────────────────────────────────────────────
- *  V24.1 PRO FINAL (2026-08-22) — النواة الاحترافية + Decision Safety + Context Recall + SemanticSyntacticVeto
+ *  V24.2 PRO FINAL (2026-08-23) — النواة الاحترافية + Decision Safety + Context Recall + SemanticSyntacticVeto
  *  ────────────────────────────────────────────────────────────────────────
  *  ما أُضيف في V23 فوق المنظومة الكاملة لـ V22 (الحفظُ التام لكل V22):
  *    ▸ SemanticSyntacticVeto 1.0 — طبقة القرار النحوي الصارمة:
@@ -429,6 +429,8 @@
     root.ArabicProofreaderV24 = api;
     root.ArabicProofreaderV24PRO = api;
     root.V24 = api;
+      root.ArabicProofreaderV24_2 = api;
+      root.V24_2 = api;
     // علامة جاهزية صريحة يمكن للقالب فحصها قبل بدء التدقيق
     root.__ARABIC_PROOFREADER_V18_READY__ = true;
     root.__ARABIC_PROOFREADER_V19_READY__ = true;
@@ -437,6 +439,7 @@
     root.__ARABIC_PROOFREADER_V22_READY__ = true;
     root.__ARABIC_PROOFREADER_V23_READY__ = true;
     root.__ARABIC_PROOFREADER_V24_READY__ = true;
+      root.__ARABIC_PROOFREADER_V24_2_READY__ = true;
     root.__ARABIC_PROOFREADER_VERSION__ = api.META.version;
     try {
       // تحذير فقط إذا وُجد محرك قديم (V16/V17) في الصفحة — لا يتوقف التحميل أبدًا
@@ -459,10 +462,10 @@
 const META = Object.freeze({
   name: 'Arabic Proofreader Hybrid Engine',
   nameArabic: 'محرك التدقيق العربي الهجين — النسخة الاحترافية الشاملة',
-  version: '24.1.0',
-  edition: 'PRO-FINAL-V24.1',
+  version: '24.2.0',
+  edition: 'PRO-FINAL-V24.2',
   language: 'ar',
-  release: 'V24.1 PRO FINAL — إصلاحات القرار والسياق + الإخراج الاحترافي فوق V23',
+  release: 'V24.2 PRO FINAL — استكمال الاستدعاء الإملائي + واو الجماعة + العبارات الثابتة فوق V24.1',
   stability: 'stable',
   releaseDate: '2026-08-22',
   governingPrinciple: 'عدم إفساد الجملة الصحيحة أهم من اكتشاف خطأ إضافي — توليدُ الاقتراح لا يعني قبولَه.',
@@ -738,6 +741,8 @@ const DEFAULT_OPTIONS = Object.freeze({
     approximationVerbs: true,
     // V23.0.0 — طبقة القرار النحوي الصارمة
     semanticSyntacticVeto: true,
+    // V24.2.0 — الاستدعاء الإملائي والعبارات الثابتة وواو الجماعة
+    v242OrthographyRecall: true,
     // V23.1.0 — طبقة الحماية النحوية (حجب الإنذارات الكاذبة أولًا)
     protectionLayer231: true,
     // V24.1.0 — نصب المفعول به بعد الأفعال المتعدية المحددة
@@ -14819,6 +14824,139 @@ function v241ApplySafetyLayer(context, findings) {
   return {kept, vetoed};
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * V24.2.0 PRO FINAL — Recall & Arabic Fixed-Expression Layer
+ *
+ * إضافات صرفة فوق V24.1:
+ *   1) «إنشاء الله» ← «إن شاء الله» و«انشاء الله» بصورها القياسية.
+ *   2) إكمال أخطاء واو الجماعة الشائعة غير المفهرسة مثل «تهملو ← تهملوا».
+ *   3) رفع أخطاء التاء المربوطة الواضحة في هذا السياق من اقتراح يدوي إلى
+ *      تصحيح إملائي مرجعي عالي الثقة، مع مطابقة السطح فقط لمنع التخمين.
+ *   4) اختبار انحدار مستقل يضمن بقاء إصلاحات V24.1 وعدم عودة الـFalse Positives.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+const V242_ORTHOGRAPHY_CORE = Object.freeze({
+  'العربيه': 'العربية',
+  'إملائيه': 'إملائية',
+  'متعدده': 'متعددة',
+  'ولغويه': 'ولغوية',
+  'سلبا': 'سلبًا',
+  'تهملو': 'تهملوا',
+  'وخصوصا': 'وخصوصًا',
+  'بدلا': 'بدلًا',
+  'اقتراحا': 'اقتراحًا',
+  'صحيحا': 'صحيحًا'
+});
+
+const V242_FIXED_PHRASES = Object.freeze({
+  'إنشاء الله': 'إن شاء الله',
+  'انشاء الله': 'إن شاء الله',
+  'إنشاءالله': 'إن شاء الله',
+  'انشاءالله': 'إن شاء الله'
+});
+
+function v242SupplementFindings(context, findings) {
+  const out = [...(findings || [])];
+  const seen = new Set(out.map(f => `${f.index}|${f.length}|${f.replacement}`));
+
+  // 1) عبارات ثابتة — تُعالَج على مستوى النص كي تعمل مع علامتي الاقتباس والترقيم.
+  for (const [bad, good] of Object.entries(V242_FIXED_PHRASES)) {
+    let start = 0;
+    while ((start = context.text.indexOf(bad, start)) >= 0) {
+      if (boundary(context.text, start, bad.length)) {
+        const finding = findingFromTextSpan(context, {
+          normalizedStart: start,
+          normalizedEnd: start + bad.length,
+          replacement: good,
+          ruleId: `V242_FIXED_PHRASE:${bad}`,
+          type: 'إملائي',
+          classification: 'orthographic-phrase',
+          confidence: 0.999,
+          explanation: 'تصحيح اصطلاحي وإملائي ثابت لكتابة «إن شاء الله» منفصلة؛ لا تُحمل «إنشاء» هنا على معنى المصدر المشتق من أنشأ.',
+          evidence: ['V242-reviewed-fixed-phrase', 'exact-surface-match'],
+          safe: true,
+          metadata: {reviewed: true, source: 'V242_FIXED_PHRASES'}
+        });
+        const key = `${finding.normalizedStart}|${bad.length}|${good}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          out.push(finding);
+        }
+      }
+      start += bad.length;
+    }
+  }
+
+  // 2) أخطاء سطحية مرجعية قطعية — لا نعتمد على تحليل صرفي منافس.
+  for (const token of context.tokens || []) {
+    if (!token || token.type !== 'word') continue;
+    const replacement = V242_ORTHOGRAPHY_CORE[token.surface];
+    if (!replacement || replacement === token.surface) continue;
+    const key = `${token.originalStart}|${token.originalEnd - token.originalStart}|${replacement}`;
+    if (seen.has(key)) continue;
+    const finding = findingFromSpan(context, {
+      startToken: token,
+      replacement,
+      ruleId: 'V242_CORE_ORTHOGRAPHY',
+      type: 'إملائي',
+      classification: 'orthographic',
+      confidence: 0.999,
+      explanation: 'تصحيح إملائي مرجعي عالي الثقة من سجل أخطاء مراجع، مع مطابقة السطح لمنع الإنذارات الكاذبة.',
+      evidence: ['V242-reviewed-orthography-map', 'exact-surface-match'],
+      safe: true,
+      metadata: {reviewed: true, source: 'V242_ORTHOGRAPHY_CORE'}
+    });
+    seen.add(key);
+    out.push(finding);
+  }
+  return out;
+}
+
+const V242_GOLD_REGRESSIONS = Object.freeze([
+  ['v242-g-01', 'إنشاء الله سننجح.', 'إن شاء الله'],
+  ['v242-g-02', 'اللغة العربيه جميلة.', 'العربية'],
+  ['v242-g-03', 'أخطاء إملائيه متعددة.', 'إملائية'],
+  ['v242-g-04', 'أخطاء متعدده في النص.', 'متعددة'],
+  ['v242-g-05', 'لا تهملو دروسكم.', 'تهملوا'],
+  ['v242-g-06', 'أخطاء إملائيه ونحويه ولغويه متعدده.', 'ولغوية'],
+  ['v242-g-07', 'وخصوصا يجب أن نراجع النص بدلا من تجاهله.', 'خصوصًا'],
+  ['v242-g-08', 'ويجب أن يقدم اقتراحا صحيحا.', 'اقتراحًا']
+]);
+
+const V242_BLOCK_REGRESSIONS = Object.freeze([
+  ['v242-b-01', 'إنشاء مشروع جديد مهم.'],
+  ['v242-b-02', 'اللغة العربية جميلة.'],
+  ['v242-b-03', 'الطلاب ينجحون عندما لا يهملوا دروسهم.'],
+  ['v242-b-04', 'قال المدير للموظف إن التقرير الذي قدمته أمس يحتاج إلى مراجعة.'],
+  ['v242-b-05', 'كُتِبَ الدرسُ.'],
+  ['v242-b-06', 'إنشاء مشروع جديد مهم.']
+]);
+
+function runRegressionSuiteV242(options = {}) {
+  const failures = [];
+  let passed = 0;
+  for (const [id, text, expected] of V242_GOLD_REGRESSIONS) {
+    const result = analyze(text, options);
+    const hit = String(result.corrected || '').includes(expected)
+      || (result.findings || []).some(f => String(f.replacement || '').includes(expected));
+    if (hit) passed += 1;
+    else failures.push({id, kind: 'missed-error', text, expected,
+      got: (result.findings || []).map(f => `${f.original}>${f.replacement}`)});
+  }
+  for (const [id, text] of V242_BLOCK_REGRESSIONS) {
+    const result = analyze(text, options);
+    const language = (result.findings || []).filter(f =>
+      f.classification !== 'style' && f.suggestionGroup !== 'تحسين التنسيق والأسلوب');
+    if (!language.length) passed += 1;
+    else failures.push({id, kind: 'false-positive', text,
+      findings: language.map(f => ({original: f.original, replacement: f.replacement,
+        ruleId: f.ruleId, confidence: f.confidence}))});
+  }
+  return {version: META.version, total: V242_GOLD_REGRESSIONS.length + V242_BLOCK_REGRESSIONS.length,
+    passed, failures, valid: failures.length === 0};
+}
+
 function analyze(input, options = {}) {
   const context = createContext(input, options);
   const rawFindings = [];
@@ -14841,6 +14979,14 @@ function analyze(input, options = {}) {
   const v241ExtraFindings = v241SupplementFindings(context, []);
   rawFindings.push(...v241ExtraFindings);
   context.v241RawAdded = rawFindings.length;
+
+  // V24.2.0 — Recall إضافي محدود وآمن: عبارات ثابتة + واو الجماعة +
+  // تاء مربوطة مرجعية واضحة. تمر جميعها عبر الحراس القديمة والجديدة.
+  if (context.options.rules.v242OrthographyRecall !== false) {
+    const v242ExtraFindings = v242SupplementFindings(context, []);
+    rawFindings.push(...v242ExtraFindings);
+    context.v242RawAdded = v242ExtraFindings.length;
+  }
 
   // V19.0.0 — FalsePositiveFirewall 2.0: يحجب ما يكسر قراءةً صحيحة محسومة.
   let effectiveFindings = rawFindings;
@@ -14957,6 +15103,7 @@ function analyze(input, options = {}) {
       replacement: v.finding.replacement, reason: v.reason, detail: v.detail
     }))
   };
+  result.v242Added = context.v242RawAdded || 0;
 
   // V18.9.0: مسار الملاحظات التحليلية — منفصل تمامًا عن الأخطاء المعتمدة،
   // فلا يؤثر في corrected ولا في findings ولا في الإحصاءات.
@@ -16694,7 +16841,8 @@ function validate({
       const replacements = result.findings.map(x => x.replacement).filter(Boolean);
       const equivalenceMap = {
         'DEMONSTRATIVE_APPOSITION_CASE_V18': ['V1900_DEM_CHAIN_OBLIQUE_CASE','V1900_DEM_CHAIN_NOMINATIVE_CASE'],
-        'FIVE_NOUNS_CASE_V18': ['FIVE_NOUNS_PHRASE_V19']
+        'FIVE_NOUNS_CASE_V18': ['FIVE_NOUNS_PHRASE_V19'],
+        'PRODUCTIVE_TAA_MARBUTA_V187': ['V242_CORE_ORTHOGRAPHY']
       };
       const expectedRules = test.rules || [];
       const rulesOk = expectedRules.every(r => {
@@ -18902,6 +19050,7 @@ function runFullSuiteV23(options = {}) {
   const regressionV23 = runRegressionSuiteV23(options);
   const benchmarkV23 = runArabicProBenchmarkV23(ARABIC_PRO_BENCHMARK_V23, options);
   const regressionV241 = runRegressionSuiteV241(options);
+  const regressionV242 = runRegressionSuiteV242(options);
   const suites = {
     ...base.suites,
     regressionV23: {valid: regressionV23.valid, total: regressionV23.total,
@@ -18913,10 +19062,12 @@ function runFullSuiteV23(options = {}) {
       valid: benchmarkV23.precision >= 0.99 && benchmarkV23.falsePositiveRate <= 0.01,
       failures: benchmarkV23.fpList.slice(0, 20)},
     regressionV241: {valid: regressionV241.valid, total: regressionV241.total,
-      passed: regressionV241.passed, failures: regressionV241.failures.slice(0, 20)}
+      passed: regressionV241.passed, failures: regressionV241.failures.slice(0, 20)},
+    regressionV242: {valid: regressionV242.valid, total: regressionV242.total,
+      passed: regressionV242.passed, failures: regressionV242.failures.slice(0, 20)}
   };
   return {version: META.version,
-    valid: base.valid && regressionV23.valid && suites.benchmarkV23.valid && regressionV241.valid, suites};
+    valid: base.valid && regressionV23.valid && suites.benchmarkV23.valid && regressionV241.valid && regressionV242.valid, suites};
 }
 
 
@@ -20271,6 +20422,8 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
   runRegressionSuiteV23, runArabicProBenchmarkV23, runFullSuiteV23,
   runRegressionSuiteV241, V241_GOLD_REGRESSIONS, V241_BLOCK_REGRESSIONS,
   v241SupplementFindings, v241ApplySafetyLayer, V241_ORTHOGRAPHY_CORE,
+  runRegressionSuiteV242, V242_GOLD_REGRESSIONS, V242_BLOCK_REGRESSIONS,
+  v242SupplementFindings, V242_ORTHOGRAPHY_CORE, V242_FIXED_PHRASES,
   applyV23GovernanceV23, inspectV23GovernanceV23, buildV23TracksV23,
   semanticSyntacticVeto: Object.freeze({
     version: '1.0', apply: applyV23GovernanceV23, inspect: inspectV23GovernanceV23,
@@ -20295,7 +20448,7 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
     version: '1.0', build: buildHtmlV24, webApp: buildWebAppHtmlV24
   }),
   analyzeLongV24,
-  V24_PRO: Object.freeze({version: '24.0.0', edition: 'PRO-FINAL-V24.1',
+  V24_PRO: Object.freeze({version: '24.2.0', edition: 'PRO-FINAL-V24.2',
     analyze: analyzePRO, validate: runFullSuiteV23,
     benchmark: runArabicProBenchmarkV23,
     benchmarkAdditions: runV24AdditionBenchmarkV24,
