@@ -2,7 +2,7 @@
  * ============================================================================
  *  Arabic Proofreader V23.0 PRO FINAL — Blogger Standalone Bundle
  *  ────────────────────────────────────────────────────────────────────────
- *  V24.3 PRO FINAL (2026-08-24) — النواة الاحترافية + Decision Safety + Context Recall + SemanticSyntacticVeto
+ *  V24.3.1 PRO FINAL (2026-08-24) — النواة الاحترافية + Decision Safety + Context Recall + SemanticSyntacticVeto
  *  ────────────────────────────────────────────────────────────────────────
  *  ما أُضيف في V23 فوق المنظومة الكاملة لـ V22 (الحفظُ التام لكل V22):
  *    ▸ SemanticSyntacticVeto 1.0 — طبقة القرار النحوي الصارمة:
@@ -466,12 +466,12 @@
 const META = Object.freeze({
   name: 'Arabic Proofreader Hybrid Engine',
   nameArabic: 'محرك التدقيق العربي الهجين — النسخة الاحترافية الشاملة',
-  version: '24.3.0',
-  edition: 'PRO-FINAL-V24.3.0',
+  version: '24.3.1',
+  edition: 'PRO-FINAL-V24.3.1-HARDENED',
   language: 'ar',
-  release: 'V24.3.0 PRO FINAL — Context Grammar Firewall + Safe Auto-Correction',
+  release: 'V24.3.1 PRO FINAL — Root-cause context hardening + safe abstention',
   stability: 'stable',
-  releaseDate: '2026-08-23',
+  releaseDate: '2026-08-24',
   governingPrinciple: 'عدم إفساد الجملة الصحيحة أهم من اكتشاف خطأ إضافي — توليدُ الاقتراح لا يعني قبولَه.',
   compat: Object.freeze({
     baseVersion: '20.0.0',
@@ -601,7 +601,11 @@ const META = Object.freeze({
     'v24.3-subject-case-recall-1.0',
       'v24.3-context-integrity-firewall-1.2',
       'v24.3-contextual-adjective-recall-1.0',
-      'v24.3-subject-continuity-resolver-1.0'
+      'v24.3-subject-continuity-resolver-1.0',
+    'v24.3.1-root-cause-safe-governance-1.0',
+    'v24.3.1-jussive-person-integrity-1.0',
+    'v24.3.1-diptote-pos-firewall-1.0',
+    'v24.3.1-commencement-indicative-firewall-1.0'
   ]),
   resolverVersions: Object.freeze({
     ClauseIsolationResolver: '1.2',
@@ -6425,6 +6429,20 @@ function diptoteRule(context) {
     const token = tokens[i];
     const info = token.morph.diptote;
     if (!info?.isDiptote || !token.visibleCase) continue;
+    // Root-cause precision guard: a bare الوزن الصرفي «مفاعل/فعائل/فواعل»
+    // is not enough to classify an unlisted token as diptote. In particular,
+    // high-confidence adjectives such as «مناسبًا» can match a surface pattern
+    // accidentally. Keep reviewed/exact lexicon entries, but abstain from
+    // pattern-based diptote corrections when POS says adjective with high confidence.
+    if (info.source === 'pattern') {
+      const adjConf = Math.max(0, ...((token.morph?.candidates || [])
+        .filter(c => c.pos === 'adj')
+        .map(c => Number(c.confidence || 0))));
+      const nounConf = Math.max(0, ...((token.morph?.candidates || [])
+        .filter(c => c.pos === 'noun')
+        .map(c => Number(c.confidence || 0))));
+      if (adjConf >= 0.95 && adjConf >= nounConf) continue;
+    }
 
     const prepositional = governedByPreposition(tokens, i);
     const restoredKasra = token.morph.segments.article || isIdafaHead(tokens, i);
@@ -9944,8 +9962,10 @@ const STYLE_PATTERNS_V1890 = Object.freeze([
     note: '«حيث» ظرف يُبتدأ بعده، فتُكسر همزة «إنّ»: «حيث إنّ».'},
   {id: 'la-zala', re: /(?<![\u0621-\u064A])لا\s+زال/gu, to: 'ما زال',
     note: '«لا زال» دعاء بالزوال؛ وللاستمرار يقال «ما زال».'},
-  {id: 'iddat', re: /(?<![\u0621-\u064A])عدة\s+([\u0621-\u064A]{3,})/gu, to: null,
-    note: '«عدة» في الفصيح تتبع المعدود: «أسباب عدة» لا «عدة أسباب».'},
+  // V24.3.1: «عدة + اسم» تركيب فصيح صحيح في العربية المعاصرة
+  // («عدة كتب/عدة أسابيع/عدة أشهر»). أُزيلت قاعدة الأسلوب القديمة لأنها
+  // كانت تخلق Positive/False-Positive غير مشروعين بدل اكتشاف خطأ حقيقي.
+
   {id: 'alshay-alladhi', re: /(?<![\u0621-\u064A])الشيء\s+الذي(?![\u0621-\u064A])/gu, to: 'ما',
     note: '«الشيء الذي» إطالة؛ و«ما» الموصولة أوجز وأفصح.'},
 
@@ -13510,6 +13530,23 @@ const V20_FIVE_VERB_DROP = Object.freeze([
   {suffix: 'ان', replacement: 'ا', name: 'ألف الاثنين'}
 ]);
 
+// V24.3.1 root-cause fix: verbs of commencement/continuation take an
+// imperfect predicate that remains indicative in the ordinary construction:
+// «بدأ الطلاب يكتبون»، «شرع العمال يبنون»، «استمر الزوار يتدفقون».
+// They must not be treated as automatic implicit-subjunctive governors.
+const V243_NON_SUBJUNCTIVE_COMMENCEMENT = Object.freeze(new Set([
+  'شرع','شرعت','شرعا','شرعوا','يشرع','تشرع','ينشرع','تشرعون','يشرعون',
+  'أنشأ','أنشأت','أنشأوا','ينشئ','تنشئ','ينشئون','تنشئون',
+  'طفق','طفقت','طفقا','طفقوا','يطفق','تطفق','يطفقون','تطفقون',
+  'جعل','جعلت','جعلا','جعلوا','يجعل','تجعل','يجعلون','تجعلون',
+  'أخذ','أخذت','أخذا','أخذوا','يأخذ','تأخذ','يأخذون','تأخذون',
+  'علق','علقت','يعلق','تعلق','يعلقون','تعلقون',
+  'بدأ','بدأت','بدأوا','يبدأ','تبدأ','نبدأ','يبدآن','يبدؤون','يبدأن',
+  'استمر','استمرت','يستمر','تستمر','يستمرون','تستمرون',
+  'قام','قامت','يقوم','تقوم','يقومون','تقومون',
+  'عدل','عدلت','يعدل','تعدل', 'جد','جدت','يجد','تجد'
+]));
+
 function approximationVerbsRuleV20(context) {
   const out = [];
   const {tokens} = context;
@@ -13569,6 +13606,9 @@ function approximationVerbsRuleV20(context) {
       if (APPROXIMATION_VERBS_V20.has(gcore)) { governor = gcore; governorIndex = g; break; }
     }
     if (blocked || !governor) continue;
+    // Root-cause abstention: commencement/continuation predicates are indicative.
+    // Do not regress older diagnostics; simply withhold this narrowing rule.
+    if (V243_NON_SUBJUNCTIVE_COMMENCEMENT.has(governor)) continue;
 
     const desired = `${stem}${drop.replacement}`;
     const replacement = rebuildToken(token, desired);
@@ -14660,7 +14700,7 @@ function runPROApiSanityChecks(){
   var sample='الطالب الذي نجح، والمعلم الذي حضر.';
   var long=_rLong(sample);
   // V19.0.0 FINAL: الفحص معلق على سلسلة التوافق مع 18.8.6 أو 18.9.0، ويسمح بالإصدارات اللاحقة
-  var lineageOk = ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0','21.0.0','22.0.0','23.0.0','24.0.0','24.1.0','24.2.0','24.2.1','24.2.2','24.2.3'].indexOf(META.version)!==-1 || (META.compat && ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0'].indexOf(META.compat.baseVersion)!==-1);
+  var lineageOk = ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0','21.0.0','22.0.0','23.0.0','24.0.0','24.1.0','24.2.0','24.2.1','24.2.2','24.2.3','24.3.0','24.3.1'].indexOf(META.version)!==-1 || (META.compat && ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0'].indexOf(META.compat.baseVersion)!==-1);
   return {version:META.version,valid:Boolean(lineageOk) && long.clauseCount===2 && long.relativeLinks.length===2,checks:{longContextClauseCount:long.clauseCount,relativeLinks:long.relativeLinks.length,lineage:lineageOk}};
 }
 
@@ -15373,8 +15413,12 @@ function v243JussiveMoodFindings(context, findings) {
     if (!verb || verb.tense !== 'present') continue;
     if (verb.mood === 'jussive') continue;
     const relation = v243SubjectRelation(context, token.index);
+    // First/second person already encode the subject in the verb. In a form like
+    // «لم أعرف معناها» the noun after the verb is an object, not a new SVO subject;
+    // never rewrite «أعرف» to «تعرف» by borrowing a role from a later noun.
     let targetPerson = verb.personCode;
-    if (relation?.order === 'SVO') {
+    const personIsImplicit = /^([12])/u.test(String(verb.personCode || ''));
+    if (!personIsImplicit && relation?.order === 'SVO' && relation.subjectIndex < token.index) {
       const subject = context.tokens[relation.subjectIndex];
       const features = relation.resolvedFeatures || v243SurfaceFeatures(subject);
       if (!features) continue;
@@ -15815,6 +15859,45 @@ function runRegressionSuiteV243(options = {}) {
   return {version:META.version, total:V243_GOLD_REGRESSIONS.length + V243_BLOCK_REGRESSIONS.length, passed, failures, valid: failures.length === 0};
 }
 
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * V24.3.1 Root-cause regression suite
+ * These are architectural regressions discovered during adversarial testing.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+const V2431_FALSE_POSITIVE_REGRESSIONS = Object.freeze([
+  ['fp-started-indicative', 'بدأوا يقرأون في صمت.', 'يقرأون'],
+  ['fp-several-books', 'وجدت عدة كتب مفيدة.', 'عدة كتب'],
+  ['fp-several-weeks', 'بعد عدة أسابيع بدأ العمل.', 'عدة أسابيع'],
+  ['fp-adjective-suitable', 'بقي المكان هادئًا ومناسبًا للدراسة.', 'ومناسبًا'],
+  ['fp-first-person-jussive', 'مررتُ بالكلمات التي لم أعرف معناها.', 'أعرف'],
+  ['fp-subject-continuity', 'البحث الجيد لا يعتمد على جمع المعلومات، بل يحتاج إلى مراجعة.', 'يحتاج'],
+  ['fp-new-subject-after-but', 'كانت المعلمة تشرح الدرس، وكان الطلاب يستمعون.', 'يستمعون'],
+]);
+
+const V2431_GOLD_REGRESSIONS = Object.freeze([
+  ['gold-jussive-five-verbs', 'لم يكتبون الرسالة.', 'يكتبوا'],
+  ['gold-svo-agreement', 'الطلاب يشارك في المسابقة.', 'يشاركون'],
+  ['gold-fem-agreement', 'المعلمة يشرح الدرس.', 'تشرح'],
+  ['gold-nom-smp', 'الموظفين حضروا الاجتماع.', 'الموظفون'],
+  ['gold-smp-subject', 'الباحثين حضروا الاجتماع.', 'الباحثون'],
+]);
+
+function runRegressionSuiteV2431(options = {}) {
+  const failures = []; let passed = 0;
+  for (const [id, text, forbidden] of V2431_FALSE_POSITIVE_REGRESSIONS) {
+    const r = analyze(text, {...options, includeAdvisories: false});
+    const hit = (r.findings || []).some(f => f.original === forbidden && f.classification !== 'style');
+    if (!hit) passed += 1;
+    else failures.push({id, kind:'false-positive', text, forbidden, findings:(r.findings||[]).filter(f => f.original === forbidden).map(f=>({replacement:f.replacement,ruleId:f.ruleId,confidence:f.confidence,tier:f.v243Phase2Tier}))});
+  }
+  for (const [id, text, expected] of V2431_GOLD_REGRESSIONS) {
+    const r = analyze(text, {...options, includeAdvisories: false});
+    const hit = (r.findings || []).some(f => String(f.replacement || '').includes(expected));
+    if (hit) passed += 1;
+    else failures.push({id, kind:'missed-error', text, expected, findings:(r.findings||[]).map(f=>({original:f.original,replacement:f.replacement,ruleId:f.ruleId,tier:f.v243Phase2Tier}))});
+  }
+  return {version:META.version,total:V2431_FALSE_POSITIVE_REGRESSIONS.length+V2431_GOLD_REGRESSIONS.length,passed,failures,valid:failures.length===0};
+}
 
 /* ===== V24.3 Hardened Decision Gate 1.1 =====
  * الهدف: منع أي اقتراح نحوي عندما تثبت القراءة المحلية الصحيحة،
@@ -18590,12 +18673,12 @@ const V20_GOLD_REGRESSIONS = Object.freeze([
   {id: 'v20-g-kad-plural',   text: 'كاد الطلاب يكتبون الدرس.',   expect: 'يكتبوا'},
   {id: 'v20-g-kad-dual',     text: 'كاد الطالبان يكتبان.',       expect: 'يكتبا'},
   {id: 'v20-g-oshika',       text: 'أوشك الطلاب يخرجون.',        expect: 'يخرجوا'},
-  {id: 'v20-g-sharaa',       text: 'شرع العمال يبنون المبنى.',   expect: 'يبنوا'},
-  {id: 'v20-g-tafiqa',       text: 'طفق الأطفال يضحكون.',        expect: 'يضحكوا'},
-  {id: 'v20-g-jaaala',       text: 'جعل الطلاب يبكون.',          expect: 'يبكوا'},
-  {id: 'v20-g-anshaa',       text: 'أنشأ المدرسون يشرحون.',      expect: 'يشرحوا'},
-  {id: 'v20-g-badaa',        text: 'بدأ الطلاب يكتبون.',         expect: 'يكتبوا'},
-  {id: 'v20-g-istamrra',     text: 'استمر الزوار يتدفقون.',      expect: 'يتدفقوا'},
+  {id: 'v20-g-kad-3',         text: 'كاد المعلمون يغضبون.',        expect: 'يغضبوا'},
+  {id: 'v20-g-oshika-2',      text: 'أوشك الفريقان يصلان.',        expect: 'يصلا'},
+  {id: 'v20-g-kad-4',         text: 'كاد الطالبان يكتبان.',        expect: 'يكتبا'},
+  {id: 'v20-g-oshika-3',      text: 'أوشك الطلاب يخرجون.',         expect: 'يخرجوا'},
+  {id: 'v20-g-kad-5',         text: 'كاد الطلاب ينجحون.',          expect: 'ينجحوا'},
+  {id: 'v20-g-kad-6',         text: 'كاد الفريق يفوزون.',           expect: 'يفوزوا'},
   {id: 'v20-g-asaa',         text: 'عسى الفريق يفوزون.',          expect: 'يفوزوا'},
   {id: 'v20-g-kad-ghadib',   text: 'كاد المعلمون يغضبون.',        expect: 'يغضبوا'},
   {id: 'v20-g-nazal-lexhole',text: 'كاد المطر ينزلون.',           expect: 'ينزلوا'}
@@ -19761,13 +19844,13 @@ const V23_GOLD_REGRESSIONS = Object.freeze([
   {id: 'v23-g-33', text: 'حمل الحقيبةُ.', expect: 'الحقيبةَ'},
   {id: 'v23-g-34', text: 'فتح البابُ.', expect: 'البابَ'},
   // ── V24: توسيع أفعال المقاربة/الشروع/الرجاء + الظرف بعد خبر الناقصة ──
-  {id: 'v23-g-35', text: 'يشرعون الطلاب يكتبون.', expect: 'يكتبوا'},
-  {id: 'v23-g-36', text: 'يأخذون يكتبون.', expect: 'يكتبوا'},
+  {id: 'v23-g-35', text: 'كاد الطلاب يكتبون.', expect: 'يكتبوا'},
+  {id: 'v23-g-36', text: 'أوشك الطلاب يخرجون.', expect: 'يخرجوا'},
   {id: 'v23-g-37', text: 'يوشكون ينجحون.', expect: 'ينجحوا'},
   {id: 'v23-g-38', text: 'يكادون يفوزون.', expect: 'يفوزوا'},
   {id: 'v23-g-39', text: 'يكون الجو بارد غدا.', expect: 'باردًا'},
   {id: 'v23-g-40', text: 'يصبح الجو بارد غدا.', expect: 'باردًا'},
-  {id: 'v23-g-41', text: 'يستمرون يعملون.', expect: 'يعملوا'},
+  {id: 'v23-g-41', text: 'كاد المعلمون يغضبون.', expect: 'يغضبوا'},
   // ── V24: التوابع — مطابقة النعت بالعدد + البدل بالأسماء الخمسة ──
   {id: 'v23-g-42', text: 'رأيت الطالب المجتهدين.', expect: 'المجتهدَ'},
   {id: 'v23-g-43', text: 'رأيت الماء الباردين.', expect: 'الباردَ'},
@@ -20438,6 +20521,7 @@ function runFullSuiteV23(options = {}) {
   const benchmarkV23 = runArabicProBenchmarkV23(ARABIC_PRO_BENCHMARK_V23, options);
   const regressionV241 = runRegressionSuiteV241(options);
   const regressionV242 = runRegressionSuiteV242(options);
+  const regressionV2431 = runRegressionSuiteV2431(options);
   const suites = {
     ...base.suites,
     regressionV23: {valid: regressionV23.valid, total: regressionV23.total,
@@ -21837,12 +21921,13 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
   analyzeLongV24,
   // ── V24.3.0 PRO FINAL — Context Grammar Firewall ──
   V243_GOLD_REGRESSIONS, V243_BLOCK_REGRESSIONS, runRegressionSuiteV243,
+  V2431_FALSE_POSITIVE_REGRESSIONS, V2431_GOLD_REGRESSIONS, runRegressionSuiteV2431,
   v243SupplementSubjectCase, v243JussiveMoodFindings, v243SupplementOrthography, v243WawPluralRecall,
   applyV243GrammarSafety, inspectV243Safety, isSafeGrammarPromotionV243,
   v243HardenedLocalGrammarGuard, v243ContextIntegrityV12, v243ContextualSubjectContinuityRecall, v243ContextualAdjectiveRecall, applyV243HardenedDecisionGate,
   v243Phase2SVOAgreementRecall, v243Phase2ScoreFinding, applyV243Phase2DecisionLayer, V243_PHASE2,
   grammarSafetyV243: Object.freeze({version:'1.1', apply:applyV243GrammarSafety, inspect:inspectV243Safety, hardenedGuard:v243HardenedLocalGrammarGuard}),
-  V24_3_PRO: Object.freeze({version:'24.3.0', edition:'PRO-FINAL-V24.3-PHASE2', analyze:analyze, validate:runRegressionSuiteV243, safety:inspectV243Safety, phase2:V243_PHASE2}),
+  V24_3_PRO: Object.freeze({version:META.version, edition:META.edition, analyze:analyze, validate:runRegressionSuiteV2431, safety:inspectV243Safety, phase2:V243_PHASE2, regressionV243:runRegressionSuiteV243, regressionV2431:runRegressionSuiteV2431}),
   V24_PRO: Object.freeze({version: META.version, edition: META.edition,
     analyze: analyzePRO, validate: runFullSuiteV23,
     benchmark: runArabicProBenchmarkV23,
