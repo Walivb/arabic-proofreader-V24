@@ -15428,6 +15428,70 @@ function v243SupplementOrthography(context, findings) {
   return out;
 }
 
+
+
+function v243Phase2SVOAgreementRecall(context, findings) {
+  const out=[...(findings||[])];
+  const seen=new Set(out.map(f=>`${f.index}|${f.length}|${f.replacement}`));
+  for(const token of context.tokens||[]){
+    if(!token || token.type!=='word') continue;
+    const verb=bestVerb(token);
+    if(!verb || !['present','past'].includes(String(verb.tense||'present'))) continue;
+    // الاستدعاء الإنتاجي لا يعمل إلا على كلمة حُسمت فعلًا؛ لا نستخدم قراءة
+    // «اسم + هاء» أو مصدر/مفعول يحتمل أن يكون فعلًا بالقرائن الصرفية الضعيفة.
+    const resolvedPos = token.morph?.resolvedPos || token.morph?.pos;
+    if(resolvedPos !== 'verb') continue;
+    if(token.morph?.segments?.pronoun) continue;
+    const nominalAlt = (token.morph?.candidates || []).filter(c=>['noun','adj','proper'].includes(c.pos)).some(c=>(c.confidence||0)>=0.80);
+    if(nominalAlt) continue;
+    const surfaceCore = stripDiacritics(token.surface || token.clean || '');
+    // صيغ الأفعال ذات الضمائر المتصلة لا تدخل في استدعاء SVO العام.
+    if (/(?:ه|ها|هم|هن|كما|كم|كن|نا|ك|ي)$/u.test(surfaceCore) && surfaceCore !== String(verb.lemma || '')) continue;
+    // الاستدعاء الحالي مخصص للفاعل الغائب الصريح؛ الضمائر المتكلمة/المخاطبة
+    // لها مسارات تصريفية أخرى، ومنعها هنا يقي من قلب «بذلك ننجح».
+    if (!/^3(?:ms|fs|mp|fp|dm|df)$/u.test(String(verb.personCode || ''))) continue;
+    // جار ومجرور قبل الفعل قد يحمل الضمير أو الاسم المتعلّق بالفعل، فلا نعيد
+    // بناء فاعل SVO على جزء من شبه الجملة («بذلك ننجح»).
+    const leadStart=Math.max(0,token.index-4);
+    if(context.tokens.slice(leadStart,token.index).some(t=>canonicalPrepositionCore(t))) continue;
+    const relation=v243PreverbalSubject(context, token.index);
+    if(!relation || relation.order!=='SVO' || relation.confidence<0.93) continue;
+    const subject=context.tokens[relation.subjectIndex];
+    if(!subject) continue;
+    const features=relation.resolvedFeatures||v243SurfaceFeatures(subject);
+    if(!features?.gender || !features?.number) continue;
+    const desired=desiredPerson(features,'SVO');
+    if(!desired || desired===verb.personCode) continue;
+    // لا نتدخل إن كان الفعل داخل ناسخ/صلة/جملة فرعية محمية.
+    const clause=v243Phase2ClauseInfo(context, token.index);
+    if(clause.insideKanaPredicate || clause.afterAn || clause.insideRelativeClause) continue;
+    const generated=verb.tense==='past'
+      ? conjugateVerb(verb.lemma,'past',desired)
+      : conjugateVerb(verb.lemma,'present',desired);
+    if(!generated) continue;
+    const surface=typeof generated==='string'?generated:(generated.surface||generated.form);
+    if(!surface || stripDiacritics(surface)===stripDiacritics(token.surface||'')) continue;
+    // الحفاظ على المزاج الحالي إذا أمكن.
+    const finalForm=verb.tense==='present' && verb.mood && verb.mood!=='indicative'
+      ? applyVerbMood(surface, desired, verb.mood, verb.lemma) || surface
+      : surface;
+    if(!finalForm || stripDiacritics(finalForm)===stripDiacritics(token.surface||'')) continue;
+    const finding=findingFromSpan(context,{
+      startToken:token,
+      replacement:rebuildToken(token,finalForm),
+      ruleId:'V243_PHASE2_SVO_AGREEMENT_RECALL',
+      type:'نحوي', classification:'verb-agreement', confidence:0.985, ruleConfidence:0.985,
+      explanation:`حُسم الفاعل المتقدم «${subject.surface}» في ترتيب SVO، ولا تطابق صيغة الفعل «${token.surface}» خصائصه؛ ولّد المحرك الصيغة «${finalForm}» من الميزان الصرفي.` ,
+      evidence:['V243-Phase2-SVO-Resolver-1.0','preverbal-subject','morphological-generation','agreement-mismatch','high-context-confidence'],
+      safe:true,
+      metadata:{subjectIndex:subject.index,verbIndex:token.index,relationConfidence:relation.confidence,order:'SVO',personFrom:verb.personCode,personTo:desired,reviewed:true,phase2:true}
+    });
+    const key=`${finding.index}|${finding.length}|${finding.replacement}`;
+    if(finding.replacement && !seen.has(key)){seen.add(key);out.push(finding);}
+  }
+  return out;
+}
+
 function v243WawPluralRecall(context, findings) {
   const out = [...(findings || [])];
   const seen = new Set(out.map(f => `${f.index}|${f.length}|${f.replacement}`));
@@ -15586,6 +15650,14 @@ function v243ContextualAdjectiveRecall(context, findings) {
     if (!targetGender && bestNoun?.gender) targetGender = bestNoun.gender;
     if (!targetNumber && bestNoun?.number) targetNumber = bestNoun.number;
     if (!targetGender || !targetNumber) continue;
+    // إذا كان الرأس والوصف معرفين بـ«الـ»، فلا يجوز لطبقة الاستدعاء أن
+    // تنزع التعريف من الوصف؛ هذا يحمي «الطلاب المجتهدين» ونظائرها.
+    const nounDef = Boolean(noun.morph?.segments?.article || noun.morph?.definite);
+    const adjDef = Boolean(adj.morph?.segments?.article || adj.morph?.definite);
+    if (nounDef && adjDef) {
+      const adjCore = stripDiacritics(adj.surface || adj.clean || '');
+      if (/^ال/u.test(adjCore)) continue;
+    }
     const adjFeatures = v243SurfaceFeatures(adj);
     const currentGender = adjFeatures.gender;
     const currentNumber = adjFeatures.number;
@@ -16003,6 +16075,182 @@ function applyV243HardenedDecisionGate(context, findings) {
   return {kept, vetoed};
 }
 
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * V24.3 Phase 2 — Context Decision Engine 1.0
+ *
+ * الفكرة: لا يكفي أن تُولد قاعدة اقتراحًا؛ يجب أن تتوافر أدلة مستقلة
+ * على صحة القرار. هذه الطبقة لا تعيد تحليل العربية من الصفر، بل تدمج
+ * نتائج المحللات الموجودة وتخفض/ترفع الثقة وتحول الحكم إلى:
+ *   DEFINITE  = خطأ محسوم
+ *   SUGGEST   = اقتراح قوي للمراجعة
+ *   ABSTAIN   = امتناع صريح عن التدخل
+ *
+ * مصادر الأدلة:
+ *  1) Morphology       الصيغة التصريفية وإمكان توليد البديل
+ *  2) Syntax           علاقة الفعل بالفاعل/المفعول
+ *  3) Locality         فاعل محلي داخل العبارة الحالية
+ *  4) ClauseBoundary   حدود الجملة والجملة الفرعية
+ *  5) Agreement        الجنس/العدد/الشخص
+ *  6) Conflict         وجود قراءة صحيحة منافسة
+ *  7) Stability        تاريخ/مصدر القاعدة (مراجعة سطحية أو استدلال)
+ *
+ * سياسة المرحلة الثانية: الامتناع أعلى من التخمين، ولا ترفع هذه الطبقة
+ * أي مرشح منخفض الثقة إلى تصحيح آلي.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+const V243_PHASE2 = Object.freeze({
+  version: '1.0',
+  thresholds: Object.freeze({
+    definite: 0.92,
+    strong: 0.80,
+    suggest: 0.62,
+    withhold: 0.61,
+    auto: 0.92
+  })
+});
+
+function v243Phase2IsGrammarFinding(f) {
+  const type = String(f?.type || '');
+  const cls = String(f?.classification || '');
+  return /نحوي|صرفي|grammar|syntax|agreement|case|mood|verb-agreement|syntactic-agreement/i.test(`${type}|${cls}`)
+    || /AGREEMENT|SUBJECT|PREDICATE|TOPIC|JUSSIVE|MOOD|OBJECT_CASE|SUBJECT_CASE|DEPENDENT_AGREEMENT/i.test(String(f?.ruleId || ''));
+}
+
+function v243Phase2ClauseInfo(context, index) {
+  const token = context.tokens[index];
+  if (!token) return {localSubject:null, afterAn:false, insideKanaPredicate:false, connector:null, boundaryRisk:1};
+  const sentence = token.sentence;
+  const windowStart = Math.max(0, index - 8);
+  const prev = context.tokens[index - 1];
+  const prevCore = stripDiacritics(prev?.morph?.core || prev?.clean || '');
+  const afterAn = prevCore === 'أن' || prevCore === 'إن';
+  let connector = null;
+  for (let i=index-1;i>=windowStart;i--) {
+    const c=stripDiacritics(context.tokens[i]?.morph?.core||context.tokens[i]?.clean||'');
+    if (['بل','لكن','ثم','و','ف'].includes(c)) { connector=c; break; }
+    if (context.tokens[i]?.sentence !== sentence || context.tokens[i]?.type==='punct') break;
+  }
+  let insideKanaPredicate = false;
+  let insideRelativeClause = false;
+  for (let i=index-1;i>=windowStart;i--) {
+    const rc = stripDiacritics(context.tokens[i]?.morph?.core || context.tokens[i]?.clean || '');
+    if (RELATIVE_PRONOUNS[rc]) { insideRelativeClause = true; break; }
+    if (context.tokens[i]?.sentence!==sentence || context.tokens[i]?.type==='punct') break;
+  }
+  for (let i=index-1;i>=windowStart;i--) {
+    const c=stripDiacritics(context.tokens[i]?.morph?.core||context.tokens[i]?.clean||'');
+    if (['كان','كانت','يكون','تكون','أصبح','أصبحت','صار','صارت','ظل','ظلت','بات','باتت'].includes(c)) {
+      // ابحث عن اسم ظاهر بين الناسخ والفعل، أو افترض خبرًا فعليًا عند وجوده.
+      const gap=context.tokens.slice(i+1,index).filter(t=>t?.sentence===sentence && t.type==='word');
+      if (gap.some(t=>isStrongNominalCandidate(t)||isNisbaSubjectCandidate(t))) insideKanaPredicate=true;
+      break;
+    }
+    if (context.tokens[i]?.sentence!==sentence || context.tokens[i]?.type==='punct') break;
+  }
+  const localSubject = v243ImmediateSubjectAfterVerb(context,index);
+  let boundaryRisk=0;
+  if (afterAn) boundaryRisk += 0.25;
+  if (insideKanaPredicate) boundaryRisk += 0.30;
+  if (connector && !localSubject) boundaryRisk += 0.15;
+  if (insideRelativeClause) boundaryRisk += 0.35;
+  return {localSubject, afterAn, insideKanaPredicate, insideRelativeClause, connector, boundaryRisk:Math.min(1,boundaryRisk)};
+}
+
+function v243Phase2ScoreFinding(context, finding) {
+  const token = tokenAtOriginalSpan(context, finding);
+  if (!token) return {score:0, tier:'withheld', factors:['missing-token'], auto:false};
+  const base = Math.max(0, Math.min(1, Number(finding.confidence || 0)));
+  let score = base * 0.35;
+  const factors=[];
+  const positive=[];
+  const negative=[];
+  const grammar = v243Phase2IsGrammarFinding(finding);
+  const clause = v243Phase2ClauseInfo(context, token.index);
+
+  const ruleId = String(finding.ruleId || '');
+  const legacyStable = (/^(?:V18|V19|V1900|V1910|V20|V21|V22|V23|V24_1|V24_2)/u.test(ruleId)
+    && Number(finding.confidence || 0) >= 0.985
+    && !/AGREEMENT|SUBJECT|PREDICATE|TOPIC_CASE|VERB_SUBJECT|DEPENDENT_AGREEMENT/u.test(ruleId))
+    || ruleId === 'V1900_KANA_PREDICATE_TANWIN'
+    || ruleId === 'V24_TRANSITIVE_OBJECT_CASE'
+    || ruleId === 'OBJECT_CASE_V1871'
+    || ruleId === 'V20_APPROXIMATION_FIVE_VERBS';
+  if (grammar) {
+    // الصيغة الحالية إذا كانت منسجمة مع علاقة محلية محسومة = عامل هدم قوي.
+    if (finding.ruleId === 'WEAK_VERB_AGREEMENT_V18' || /AGREEMENT|SUBJECT|PREDICATE|TOPIC_CASE/i.test(String(finding.ruleId||''))) {
+      const veto = v243AgreementAlreadyValid(context, finding);
+      if (veto?.veto) negative.push('current-agreement-valid');
+      else positive.push('agreement-analysis-present');
+    }
+    if (clause.localSubject !== -1 && clause.localSubject != null) positive.push('local-postverbal-subject');
+    if (clause.afterAn && clause.localSubject !== -1) positive.push('explicit-subject-after-an');
+    if (clause.afterAn && clause.localSubject === -1) negative.push('source-clause-no-explicit-subject');
+    if (clause.insideKanaPredicate) negative.push('kana-verbal-predicate-ambiguity');
+    if (clause.connector && clause.localSubject !== -1) negative.push('local-subject-overrides-continuity');
+    if (/jussive|JUSSIVE|mood/i.test(String(finding.ruleId||''))) positive.push('explicit-mood-governor');
+    if (finding.metadata?.reviewed || finding.safeCandidate) positive.push('reviewed-or-safe-candidate');
+    if (finding.metadata?.relationConfidence >= 0.95 || Number(finding.ruleConfidence||0) >= 0.99) positive.push('high-relation-confidence');
+    if (Array.isArray(finding.evidence) && finding.evidence.length >= 3) positive.push('multi-evidence');
+    if (clause.boundaryRisk > 0.45) negative.push('high-clause-boundary-risk');
+    if (finding.v243HardenedBlocked || finding.v243Blocked) negative.push('previous-veto');
+
+    score += positive.length * 0.12;
+    score -= negative.length * 0.08;
+    if (negative.includes('current-agreement-valid')) score = Math.min(score, 0.15);
+    if (negative.includes('kana-verbal-predicate-ambiguity') && !positive.includes('explicit-mood-governor')) score = Math.min(score, 0.35);
+  } else {
+    // الإملاء/الترقيم لا تخضع لصرامة التحليل النحوي.
+    if (finding.metadata?.reviewed || finding.safeCandidate) score += 0.45;
+    if (Array.isArray(finding.evidence) && finding.evidence.length >= 2) score += 0.08;
+  }
+
+  score=Math.max(0,Math.min(1,score));
+  let tier='withheld';
+  if (score >= V243_PHASE2.thresholds.definite) tier='definite';
+  else if (score >= V243_PHASE2.thresholds.strong) tier='strong';
+  else if (score >= V243_PHASE2.thresholds.suggest) tier='suggest';
+
+  // «تصحيح الكل» لا يعتمد على طبقة واحدة، بل على دليل مستقلين على الأقل.
+  const independent = new Set(positive.filter(x => ['agreement-analysis-present','local-postverbal-subject','explicit-subject-after-an','explicit-mood-governor','high-relation-confidence','reviewed-or-safe-candidate'].includes(x))).size;
+  const auto = grammar
+    ? score >= V243_PHASE2.thresholds.auto && independent >= 2 && !negative.length
+    : score >= V243_PHASE2.thresholds.auto;
+
+  factors.push(...positive.map(x=>`+${x}`), ...negative.map(x=>`-${x}`));
+  return {score, tier, auto, factors, independentEvidence:independent, grammar, legacyStable};
+}
+
+function applyV243Phase2DecisionLayer(context, findings) {
+  const kept=[]; const suppressed=[]; const decisions=[];
+  for (const finding of (findings||[])) {
+    const d=v243Phase2ScoreFinding(context,finding);
+    finding.v243Phase2 = true;
+    finding.v243Phase2Score = Number(d.score.toFixed(3));
+    finding.v243Phase2Tier = d.tier;
+    finding.v243Phase2Factors = d.factors;
+    finding.v243Phase2IndependentEvidence = d.independentEvidence;
+    finding.v243Phase2AutoApproved = d.auto;
+    const ruleName = String(finding.ruleId || '');
+    const contextualAgreement = /WEAK_VERB_AGREEMENT|SUBJECT_CASE|TOPIC_CASE|VERB_SUBJECT|V243_CONTEXTUAL_SUBJECT_CONTINUITY/i.test(ruleName)
+      && ruleName !== 'ADJECTIVE_DEPENDENT_AGREEMENT_V18';
+    if (d.grammar && contextualAgreement && d.tier === 'withheld' && !d.legacyStable) {
+      finding.v243Phase2Suppressed = true;
+      finding.manualOnly = true;
+      suppressed.push({finding,reason:'v243-phase2-low-context-confidence',detail:'امتنع محرك الفهم السياقي عن عرض اقتراح نحوي لم يبلغ عتبة الدليل.'});
+    } else {
+      if (d.grammar && !d.auto) finding.manualOnly = true;
+      if (d.tier === 'suggest' || d.tier === 'strong') finding.requiresReview = true;
+      kept.push(finding);
+    }
+    decisions.push({index:finding.index,ruleId:finding.ruleId,score:d.score,tier:d.tier,auto:d.auto,legacyStable:d.legacyStable,factors:d.factors});
+  }
+  context.v243Phase2Decisions=decisions;
+  context.v243Phase2Suppressed=suppressed;
+  return {kept,suppressed};
+}
+
 function analyze(input, options = {}) {
   const context = createContext(input, options);
   const rawFindings = [];
@@ -16045,6 +16293,7 @@ function analyze(input, options = {}) {
     v243ExtraFindings = v243SupplementOrthography(context, v243ExtraFindings);
     v243ExtraFindings = v243WawPluralRecall(context, v243ExtraFindings);
     v243ExtraFindings = v243ContextualSubjectContinuityRecall(context, v243ExtraFindings);
+    v243ExtraFindings = v243Phase2SVOAgreementRecall(context, v243ExtraFindings);
     v243ExtraFindings = v243ContextualAdjectiveRecall(context, v243ExtraFindings);
     rawFindings.push(...v243ExtraFindings);
     context.v243RawAdded = v243ExtraFindings.length;
@@ -16122,7 +16371,13 @@ function analyze(input, options = {}) {
     context.v243LateRecallVetoed = lateGate.vetoed;
   }
 
+  // V24.3 Phase 2 — Context Decision Engine: يدمج الأدلة قبل التصنيف النهائي.
+  const v243Phase2 = applyV243Phase2DecisionLayer(context, effectiveFindings);
+  effectiveFindings = v243Phase2.kept;
+  context.v243Phase2Suppressed = v243Phase2.suppressed;
+
   const ranked = rankAndClassify(effectiveFindings, context.options, context);
+  ranked.suppressed.push(...v243Phase2.suppressed.map(x => x.finding));
 
   // V24.2.2 — Final deterministic output guard. Earlier pipeline layers already
   // deduplicate findings, but future supplemental layers and long-context batching
@@ -16136,7 +16391,7 @@ function analyze(input, options = {}) {
     for (const finding of ranked.visible) {
       finding.legacyAutoCorrectable = finding.autoCorrectable;
       const promotedGrammar = isSafeGrammarPromotionV2423(finding);
-      const promotedGrammarV243 = isSafeGrammarPromotionV243(finding);
+      const promotedGrammarV243 = isSafeGrammarPromotionV243(finding) && finding.v243Phase2AutoApproved === true;
       finding.autoCorrectable = promotedGrammarV243 || promotedGrammar || (Boolean(finding.autoCorrectable) && isSafeAutoCorrectionV1910(finding));
       if (promotedGrammarV243) {
         finding.requiresReview = false;
@@ -16183,6 +16438,11 @@ function analyze(input, options = {}) {
   result.tracks = buildSuggestionTracksV1910(ranked.visible);
   result.autoCorrectable = ranked.visible.filter(x => x.autoCorrectable);
   result.manualReview = ranked.visible.filter(x => !x.autoCorrectable);
+  result.v243Phase2 = {
+    version: V243_PHASE2.version,
+    decisions: context.v243Phase2Decisions || [],
+    suppressed: (context.v243Phase2Suppressed || []).length
+  };
   result.guard = {
     blocked: (context.v1910Blocked || []).length,
     items: (context.v1910Blocked || []).map(item => ({
@@ -21580,8 +21840,9 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
   v243SupplementSubjectCase, v243JussiveMoodFindings, v243SupplementOrthography, v243WawPluralRecall,
   applyV243GrammarSafety, inspectV243Safety, isSafeGrammarPromotionV243,
   v243HardenedLocalGrammarGuard, v243ContextIntegrityV12, v243ContextualSubjectContinuityRecall, v243ContextualAdjectiveRecall, applyV243HardenedDecisionGate,
+  v243Phase2SVOAgreementRecall, v243Phase2ScoreFinding, applyV243Phase2DecisionLayer, V243_PHASE2,
   grammarSafetyV243: Object.freeze({version:'1.1', apply:applyV243GrammarSafety, inspect:inspectV243Safety, hardenedGuard:v243HardenedLocalGrammarGuard}),
-  V24_3_PRO: Object.freeze({version:'24.3.0', edition:'PRO-FINAL-V24.3', analyze:analyze, validate:runRegressionSuiteV243, safety:inspectV243Safety}),
+  V24_3_PRO: Object.freeze({version:'24.3.0', edition:'PRO-FINAL-V24.3-PHASE2', analyze:analyze, validate:runRegressionSuiteV243, safety:inspectV243Safety, phase2:V243_PHASE2}),
   V24_PRO: Object.freeze({version: META.version, edition: META.edition,
     analyze: analyzePRO, validate: runFullSuiteV23,
     benchmark: runArabicProBenchmarkV23,
