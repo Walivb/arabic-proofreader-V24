@@ -15547,7 +15547,8 @@ const V243_BLOCK_REGRESSIONS = Object.freeze([
   ['v243-b-09', 'رأيت الباحثين في القاعة.', 'الباحثين'],
   ['v243-b-10', 'وقالت المعلمة: إن القراءة الجيدة تساعد الإنسان.', 'قالت'],
   ['v243-b-11', 'بل عليه أن يقارن بين المصادر المختلفة.', 'يقارن'],
-  ['v243-b-12', 'وفي نهاية المشروع، قدم الباحثون نتائجهم إلى اللجنة.', 'الباحثون']
+  ['v243-b-12', 'وفي نهاية المشروع، قدم الباحثون نتائجهم إلى اللجنة.', 'الباحثون'],
+  ['v243-b-13', 'بل عليه أن يقارن بين المصادر المختلفة.', 'يقارن']
 ]);
 
 function runRegressionSuiteV243(options = {}) {
@@ -15570,7 +15571,7 @@ function runRegressionSuiteV243(options = {}) {
 }
 
 
-/* ===== V24.3 Hardened Decision Gate 1.1 =====
+/* ===== V24.3 Hardened Decision Gate 1.2 =====
  * الهدف: منع أي اقتراح نحوي عندما تثبت القراءة المحلية الصحيحة،
  * حتى لو أخطأ محلل دور الفاعل/المفعول في طبقة أقدم.
  * هذه طبقة دفاع نهائية؛ لا تولّد تصحيحات جديدة ولا تغيّر النواة السابقة.
@@ -15583,6 +15584,23 @@ function v243HardenedLocalGrammarGuard(context, finding) {
   const original = stripDiacritics(token.surface || token.clean || '');
   const replacement = stripDiacritics(String(finding.replacement || ''));
   if (!original || !replacement || original === replacement) return null;
+
+  // V24.3 Hardened 1.2 — حماية المصدر المؤول «أن + مضارع».
+  // إذا لم يوجد فاعل ظاهر بعد المضارع، فلا يجوز ربطه بأقرب اسم لاحق.
+  // نحجب تحديدًا قلب الصيغة المذكرة الصحيحة إلى مؤنث، مع إبقاء
+  // التصحيح العكسي «تقارن → يقارن» متاحًا عند وجود دليل آخر.
+  {
+    const prev = context.tokens[token.index - 1];
+    const prevCore = stripDiacritics(prev?.morph?.core || prev?.clean || '');
+    const next = context.tokens[token.index + 1];
+    const explicitSubject = next && next.type === 'word' &&
+      (isStrongNominalCandidate(next) || isNisbaSubjectCandidate(next));
+    const masculineToFeminine = /^ي/u.test(original) && /^ت/u.test(replacement);
+    if (prev && prevCore === 'أن' && !explicitSubject && masculineToFeminine) {
+      return {veto:true, reason:'v243-hardened-hidden-subject-after-an',
+        detail:`الفعل «${token.surface}» بعد «أن» له فاعل مستتر محتمل، ولا توجد قرينة على التأنيث؛ حُجب التحويل إلى «${finding.replacement}».`};
+    }
+  }
 
   // 1) فاعل ظاهر مباشرة بعد الفعل: إذا كانت المطابقة الحالية صحيحة،
   // لا تسمح لأي قاعدة لاحقة بقلب جنس/عدد الفعل.
