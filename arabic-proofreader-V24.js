@@ -2,7 +2,7 @@
  * ============================================================================
  *  Arabic Proofreader V23.0 PRO FINAL — Blogger Standalone Bundle
  *  ────────────────────────────────────────────────────────────────────────
- *  V24.2 PRO FINAL (2026-08-23) — النواة الاحترافية + Decision Safety + Context Recall + SemanticSyntacticVeto
+ *  V24.3 PRO FINAL (2026-08-24) — النواة الاحترافية + Decision Safety + Context Recall + SemanticSyntacticVeto
  *  ────────────────────────────────────────────────────────────────────────
  *  ما أُضيف في V23 فوق المنظومة الكاملة لـ V22 (الحفظُ التام لكل V22):
  *    ▸ SemanticSyntacticVeto 1.0 — طبقة القرار النحوي الصارمة:
@@ -15457,6 +15457,34 @@ function v243WawPluralRecall(context, findings) {
 
 
 
+function v243HasLocalExplicitSubjectAfterVerb(context, verbIndex) {
+  // قاعدة أولوية الفاعل المحلي: لا يجوز توريث فاعل من الجملة السابقة
+  // إذا ظهر بعد الفعل فاعلٌ صريح صالح داخل الجملة الحالية.
+  // هذا الحارس يعالج خصوصًا: «كانت المعلمة تشرح ... وكان الطلاب يستمعون»
+  // و«بدأت الطالبات ...»؛ فوجود «الطلاب/الطالبات» بعد الفعل يحسم العلاقة
+  // محليًا ويمنع SubjectContinuityResolver من قلب الفعل.
+  const sentence = context.tokens[verbIndex]?.sentence;
+  if (sentence == null) return false;
+  for (let j = verbIndex + 1; j < Math.min(context.tokens.length, verbIndex + 7); j += 1) {
+    const t = context.tokens[j];
+    if (!t || t.sentence !== sentence) break;
+    if (t.type === 'punct') break;
+    const c = stripDiacritics(t.morph?.core || t.clean || '');
+    if (canonicalPrepositionCore(t)) break;
+    if (VERBAL_PARTICLES.has(c) || SUBJUNCTIVE_PARTICLES.has(c) || JUSSIVE_PARTICLES.has(c) || c === 'قد') continue;
+    const noun = (t.morph?.candidates || [])
+      .filter(a => a.pos === 'noun' && (a.confidence || 0) >= 0.88)
+      .sort((a,b)=>(b.confidence||0)-(a.confidence||0))[0];
+    if (noun) return true;
+    // اسم ظاهر لم يُحسم صرفيًا بدرجة كافية: لا نخاطر بتوريث الفاعل.
+    if (t.type === 'word' && isStrongNominalCandidate(t)) return true;
+    // الأفعال والضمائر المتصلة/الأسماء المبنية قد تبدأ جملة فرعية؛ نتوقف
+    // بدل القفز فوق بنية غير محسومة.
+    if (bestVerb(t) || t.morph?.segments?.pronoun) break;
+  }
+  return false;
+}
+
 function v243ContextualSubjectContinuityRecall(context, findings) {
   const out = [...(findings || [])];
   const seen = new Set(out.map(f => `${f.index}|${f.length}|${f.replacement}`));
@@ -15465,6 +15493,10 @@ function v243ContextualSubjectContinuityRecall(context, findings) {
     const token = context.tokens[i];
     if (!token || token.type !== 'word' || !bestVerb(token)) continue;
     const ruleVerb = bestVerb(token);
+    // الفاعل الظاهر المحلي أقوى من استمرارية الفاعل عبر العطف.
+    // لا نسمح للمحلل السياقي بتغيير «بدأت الطالبات» أو «يستمعون»
+    // اعتمادًا على فاعل الجملة السابقة.
+    if (v243HasLocalExplicitSubjectAfterVerb(context, token.index)) continue;
     const currentCode = ruleVerb.personCode;
     if (!currentCode || !['3ms','3fs','3mp','3fp','3dm','3df'].includes(currentCode)) continue;
     const sentence = token.sentence;
