@@ -15521,7 +15521,8 @@ function inspectV243Safety(text, options = {}) {
     blocked: result.v243Blocked || 0,
     vetoes: result.v243Guard?.vetoes || [],
     autoCorrectable: (result.autoCorrectable || []).map(f => ({original:f.original, replacement:f.replacement, ruleId:f.ruleId, confidence:f.confidence})),
-    manualReview: (result.manualReview || []).map(f => ({original:f.original, replacement:f.replacement, ruleId:f.ruleId, confidence:f.confidence}))
+    manualReview: (result.manualReview || []).map(f => ({original:f.original, replacement:f.replacement, ruleId:f.ruleId, confidence:f.confidence})),
+    hardenedBlocked: result.v243HardenedVetoedFindings || []
   };
 }
 
@@ -15543,7 +15544,10 @@ const V243_BLOCK_REGRESSIONS = Object.freeze([
   ['v243-b-06', 'وفي نهاية المشروع قدم الباحثون نتائجهم.', 'الباحثون'],
   ['v243-b-07', 'ثم بدأت الطالبات بطرح الأسئلة التي أعددنها مسبقًا.', 'أعددنها'],
   ['v243-b-08', 'اجتمع المعلمان مع الطلاب.', 'المعلمان'],
-  ['v243-b-09', 'رأيت الباحثين في القاعة.', 'الباحثين']
+  ['v243-b-09', 'رأيت الباحثين في القاعة.', 'الباحثين'],
+  ['v243-b-10', 'وقالت المعلمة: إن القراءة الجيدة تساعد الإنسان.', 'قالت'],
+  ['v243-b-11', 'بل عليه أن يقارن بين المصادر المختلفة.', 'يقارن'],
+  ['v243-b-12', 'وفي نهاية المشروع، قدم الباحثون نتائجهم إلى اللجنة.', 'الباحثون']
 ]);
 
 function runRegressionSuiteV243(options = {}) {
@@ -15563,6 +15567,89 @@ function runRegressionSuiteV243(options = {}) {
     else failures.push({id, kind:'false-positive', text, forbidden, findings:(r.findings||[]).filter(f=>f.original===forbidden).map(f=>({replacement:f.replacement,ruleId:f.ruleId,confidence:f.confidence}))});
   }
   return {version:META.version, total:V243_GOLD_REGRESSIONS.length + V243_BLOCK_REGRESSIONS.length, passed, failures, valid: failures.length === 0};
+}
+
+
+/* ===== V24.3 Hardened Decision Gate 1.1 =====
+ * الهدف: منع أي اقتراح نحوي عندما تثبت القراءة المحلية الصحيحة،
+ * حتى لو أخطأ محلل دور الفاعل/المفعول في طبقة أقدم.
+ * هذه طبقة دفاع نهائية؛ لا تولّد تصحيحات جديدة ولا تغيّر النواة السابقة.
+ */
+function v243HardenedLocalGrammarGuard(context, finding) {
+  if (!finding || finding.replacement == null || finding.classification === 'style') return null;
+  const token = tokenAtOriginalSpan(context, finding);
+  if (!token || token.type !== 'word') return null;
+
+  const original = stripDiacritics(token.surface || token.clean || '');
+  const replacement = stripDiacritics(String(finding.replacement || ''));
+  if (!original || !replacement || original === replacement) return null;
+
+  // 1) فاعل ظاهر مباشرة بعد الفعل: إذا كانت المطابقة الحالية صحيحة،
+  // لا تسمح لأي قاعدة لاحقة بقلب جنس/عدد الفعل.
+  if (finding.ruleId === 'WEAK_VERB_AGREEMENT_V18') {
+    const verb = bestVerb(token);
+    if (verb) {
+      const next = context.tokens[token.index + 1];
+      if (next && next.type === 'word' && next.sentence === token.sentence &&
+          (isStrongNominalCandidate(next) || isNisbaSubjectCandidate(next))) {
+        const vf = v243SurfaceFeatures(next);
+        const currentPerson = verb.personCode;
+        const currentMatchesGender =
+          (currentPerson === '3fs' && vf.gender === 'f') ||
+          (currentPerson === '3ms' && vf.gender === 'm');
+        if (currentMatchesGender) {
+          return {veto:true, reason:'v243-hardened-postverbal-subject-agreement',
+            detail:`الفاعل الظاهر «${next.surface}» يأتي مباشرة بعد الفعل «${token.surface}»، وصيغة الفعل الحالية مطابقة لجنسه؛ حُجب التصحيح غير الضروري.`};
+        }
+      }
+
+      // 2) بعد «أن» أو بعد ضمير/جارّ ومجرور ممهد للمصدرية، لا نربط الفعل
+      // بأقرب اسم لاحق على أنه فاعل ما لم يكن ذلك الاسم فاعلًا صريحًا بالفعل.
+      const prev = context.tokens[token.index - 1];
+      const prevCore = stripDiacritics(prev?.morph?.core || prev?.clean || '');
+      if (prev && prevCore === 'أن') {
+        const next = context.tokens[token.index + 1];
+        const explicitSubject = next && next.type === 'word' &&
+          (isStrongNominalCandidate(next) || isNisbaSubjectCandidate(next));
+        if (!explicitSubject) {
+          return {veto:true, reason:'v243-hardened-masdar-no-explicit-subject',
+            detail:`الفعل «${token.surface}» بعد «أن» لا يملك فاعلًا ظاهرًا بعده؛ لا تُقلب المطابقة اعتمادًا على اسم لاحق في الجملة.`};
+        }
+      }
+    }
+  }
+
+  // 3) حماية جمع المذكر السالم المرفوع ظاهرًا: أي تحويل «ون» إلى «ين»
+  // بعد فعل مباشر يحتاج دليلًا قويًا جدًا على المفعولية.
+  if (/(?:ون)$/u.test(original) && /(?:ين)$/u.test(replacement)) {
+    const prevVerb = context.tokens[token.index - 1];
+    if (prevVerb && bestVerb(prevVerb) && !canonicalPrepositionCore(context.tokens[token.index - 2])) {
+      const candidates = token.morph?.candidates || [];
+      const hasNominativeSmp = candidates.some(c => c.pos === 'noun' && c.number === 'pl' && c.gender === 'm' && c.confidence >= 0.90);
+      if (hasNominativeSmp) {
+        return {veto:true, reason:'v243-hardened-visible-smp-nominative',
+          detail:`«${token.surface}» يحمل علامة رفع ظاهرة لجمع المذكر السالم بعد فعل مباشر؛ مُنع قلب «ون» إلى «ين» دون قرينة مفعولية قاطعة.`};
+      }
+    }
+  }
+
+  return null;
+}
+
+function applyV243HardenedDecisionGate(context, findings) {
+  const kept = [];
+  const vetoed = [];
+  for (const finding of (findings || [])) {
+    const verdict = v243HardenedLocalGrammarGuard(context, finding);
+    if (verdict?.veto) {
+      finding.v243HardenedBlocked = true;
+      finding.v243HardenedBlockReason = verdict.reason;
+      finding.contextValidation = finding.contextValidation || {valid:true, checks:[]};
+      finding.contextValidation.v243HardenedVeto = verdict.reason;
+      vetoed.push({finding, reason:verdict.reason, detail:verdict.detail});
+    } else kept.push(finding);
+  }
+  return {kept, vetoed};
 }
 
 function analyze(input, options = {}) {
@@ -15664,6 +15751,12 @@ function analyze(input, options = {}) {
     effectiveFindings = v243Safety.kept;
     context.v243VetoedFindings = v243Safety.vetoed;
   }
+
+  // V24.3 Hardened 1.1 — بوابة قرار نهائية محلية تمنع الانقلاب على
+  // القراءة الصحيحة عند تعارض محلل قديم مع دليل محلي قوي.
+  const v243Hardened = applyV243HardenedDecisionGate(context, effectiveFindings);
+  effectiveFindings = v243Hardened.kept;
+  context.v243HardenedVetoedFindings = v243Hardened.vetoed;
 
   const ranked = rankAndClassify(effectiveFindings, context.options, context);
 
@@ -21122,7 +21215,8 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
   V243_GOLD_REGRESSIONS, V243_BLOCK_REGRESSIONS, runRegressionSuiteV243,
   v243SupplementSubjectCase, v243JussiveMoodFindings, v243SupplementOrthography, v243WawPluralRecall,
   applyV243GrammarSafety, inspectV243Safety, isSafeGrammarPromotionV243,
-  grammarSafetyV243: Object.freeze({version:'1.0', apply:applyV243GrammarSafety, inspect:inspectV243Safety}),
+  v243HardenedLocalGrammarGuard, applyV243HardenedDecisionGate,
+  grammarSafetyV243: Object.freeze({version:'1.1', apply:applyV243GrammarSafety, inspect:inspectV243Safety, hardenedGuard:v243HardenedLocalGrammarGuard}),
   V24_3_PRO: Object.freeze({version:'24.3.0', edition:'PRO-FINAL-V24.3', analyze:analyze, validate:runRegressionSuiteV243, safety:inspectV243Safety}),
   V24_PRO: Object.freeze({version: META.version, edition: META.edition,
     analyze: analyzePRO, validate: runFullSuiteV23,
