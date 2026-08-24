@@ -434,6 +434,10 @@
       root.ArabicProofreaderV24_3 = api;
       root.ArabicProofreaderV24_3PRO = api;
       root.V24_3 = api;
+      root.ArabicProofreaderV24_3_2 = api;
+      root.V24_3_2 = api;
+      root.ArabicProofreaderV24_3_2 = api;
+      root.V24_3_2 = api;
     // علامة جاهزية صريحة يمكن للقالب فحصها قبل بدء التدقيق
     root.__ARABIC_PROOFREADER_V18_READY__ = true;
     root.__ARABIC_PROOFREADER_V19_READY__ = true;
@@ -444,7 +448,9 @@
     root.__ARABIC_PROOFREADER_V24_READY__ = true;
       root.__ARABIC_PROOFREADER_V24_2_READY__ = true;
       root.__ARABIC_PROOFREADER_V24_3_READY__ = true;
+      root.__ARABIC_PROOFREADER_V24_3_2_READY__ = true;
     root.__ARABIC_PROOFREADER_VERSION__ = api.META.version;
+      root.__ARABIC_PROOFREADER_V24_3_2_READY__ = true;
     try {
       // تحذير فقط إذا وُجد محرك قديم (V16/V17) في الصفحة — لا يتوقف التحميل أبدًا
       ['ArabicProofreaderV17', 'ArabicProofreaderV16'].forEach(function(legacy){
@@ -466,8 +472,8 @@
 const META = Object.freeze({
   name: 'Arabic Proofreader Hybrid Engine',
   nameArabic: 'محرك التدقيق العربي الهجين — النسخة الاحترافية الشاملة',
-  version: '24.3.1',
-  edition: 'PRO-FINAL-V24.3.1-HARDENED',
+  version: '24.3.2',
+  edition: 'PRO-FINAL-V24.3.2-ROLE-EXPANSION',
   language: 'ar',
   release: 'V24.3.1 PRO FINAL — Root-cause context hardening + safe abstention',
   stability: 'stable',
@@ -672,7 +678,9 @@ const META = Object.freeze({
     V241DecisionSafety: '1.0',
     V241ContextOrthography: '1.0',
     V2421DeterministicDedup: '1.0',
-    V2421ReviewedConflictPriority: '1.0'
+    V2421ReviewedConflictPriority: '1.0',
+      V2432ExpandedRoleGraph: '1.0',
+      V2432RoleBasedAgreementRecall: '1.0'
   }),
   releaseCriteria: Object.freeze({
     precision: 0.99,
@@ -14481,6 +14489,338 @@ function rankAndClassify(findings, options, context) {
 }
 
 
+
+/* ===== V24.3.2: Expanded Syntactic Role Graph =====
+   إضافة محافظة فوق V24.3.1: لا تستبدل الأدوار القديمة، بل تبني طبقة
+   roleGraph غنية بالأدلة وتُستخدم فقط عندما تكون القراءة المحلية محسومة.
+*/
+const V2432_ROLE_GRAPH_VERSION = '1.0';
+const V2432_COORDINATORS = new Set(['و','ف','ثم','بل','لكن','أو','أم','حتى']);
+const V2432_MATRIX_MARKERS = new Set(['إن','أن','لكن','ليت','لعل','كأن']);
+
+function v2432SameSentence(context, a, b) {
+  return Boolean(context.tokens[a] && context.tokens[b]
+    && context.tokens[a].sentence === context.tokens[b].sentence);
+}
+
+function v2432NearestNominalLeft(context, index, start = 0) {
+  for (let i = index - 1; i >= start; i -= 1) {
+    const t = context.tokens[i];
+    if (!t || !v2432SameSentence(context, index, i)) break;
+    if (t.type === 'punct') break;
+    if (bestVerb(t) || INNA_PARTICLES.has(t.morph?.core) || isKanaSurface(t.morph?.core)) break;
+    if (isStrongNominalCandidate(t) || isNisbaSubjectCandidate(t)) return i;
+  }
+  return -1;
+}
+
+function v2432NominalUnit(context, start, end) {
+  if (start < 0 || start >= end) return {headIndex: -1, end: start, members: []};
+  const {tokens} = context;
+  let cursor = start;
+  const members = [start];
+  // الإضافة: رأس + مضاف إليه/ذيل الإضافة.
+  while (cursor + 1 < end && isIdafaHead(tokens, cursor)) {
+    cursor += 1;
+    members.push(cursor);
+  }
+  // النعت/البدل القريب ذو المطابقة الواضحة.
+  for (let i = cursor + 1; i < Math.min(end, cursor + 4); i += 1) {
+    if (!isNominal(tokens[i]) || bestVerb(tokens[i])) break;
+    if (isAdjective(tokens[i]) && adjectiveShapeMatches(tokens[cursor], tokens[i])) {
+      members.push(i); cursor = i; continue;
+    }
+    if (PROPER_NAMES.has(tokens[i].morph?.core) && isNominal(tokens[cursor])) {
+      members.push(i); cursor = i; continue;
+    }
+    break;
+  }
+  return {headIndex: start, end: cursor + 1, members};
+}
+
+function v2432ClauseKind(context, clause) {
+  if (!clause) return 'unknown';
+  if (['relative','masdari','conditional','complement'].includes(clause.type)) return clause.type;
+  const slice = context.tokens.slice(clause.start, clause.end);
+  const firstVerb = slice.findIndex(t => bestVerb(t));
+  if (firstVerb === 0) return 'verbal';
+  if (firstVerb > 0) return 'mixed';
+  return 'nominal';
+}
+
+function v2432SurfaceNominalFeatures(token) {
+  const surface = stripDiacritics(token?.surface || token?.clean || token?.morph?.core || '');
+  if (!surface) return {gender:null, number:null, confidence:0};
+  if (/(?:ات|يات)$/u.test(surface)) return {gender:'f', number:'pl', confidence:0.94};
+  if (/(?:ون|ين)$/u.test(surface)) return {gender:'m', number:'pl', confidence:0.94};
+  if (/(?:ان|ين)$/u.test(surface)) return {gender:'m', number:'du', confidence:0.91};
+  if (/[ةه]$/u.test(surface)) return {gender:'f', number:'sg', confidence:0.90};
+  if (/(?:اء|ى)$/u.test(surface)) return {gender:'m', number:'sg', confidence:0.84};
+  return {gender:'m', number:'sg', confidence:0.86};
+}
+
+function v2432BuildRoleGraph(context) {
+  const tokens = context.tokens || [];
+  const legacyRoles = context.syntax?.roles || [];
+  const graph = {
+    version: V2432_ROLE_GRAPH_VERSION,
+    clauses: [],
+    nodes: [],
+    dependencies: [],
+    subjects: [],
+    objects: [],
+    topics: [],
+    predicates: [],
+    modifiers: [],
+    protectedRelations: [],
+    confidence: 1
+  };
+
+  for (const clause of context.syntax?.clauses || []) {
+    const node = {
+      id: clause.id,
+      type: clause.type || 'root',
+      kind: v2432ClauseKind(context, clause),
+      start: clause.start,
+      end: clause.end,
+      parent: clause.parent ?? null,
+      markerIndex: Number.isInteger(clause.markerIndex) ? clause.markerIndex : null,
+      matrix: clause.parent == null || clause.type === 'root'
+    };
+    graph.clauses.push(node);
+  }
+
+  for (const item of context.syntax?.subjectRelations || []) {
+    const subject = tokens[item.subjectIndex];
+    const verb = tokens[item.verbIndex];
+    if (!subject || !verb) continue;
+    graph.subjects.push({
+      tokenIndex: item.subjectIndex,
+      verbIndex: item.verbIndex,
+      clauseId: item.clauseId ?? null,
+      order: item.order || 'unknown',
+      confidence: item.confidence || 0,
+      evidence: [...(item.evidence || [])],
+      features: tokenFeatures(subject)
+    });
+    graph.dependencies.push({from: item.verbIndex, to: item.subjectIndex, relation: 'subject', confidence: item.confidence || 0});
+    graph.protectedRelations.push({type:'subject', verbIndex:item.verbIndex, tokenIndex:item.subjectIndex, confidence:item.confidence||0});
+  }
+
+  for (const item of context.syntax?.objectRelations || []) {
+    if (!Number.isInteger(item.objectIndex)) continue;
+    graph.objects.push({
+      tokenIndex:item.objectIndex,
+      verbIndex:item.verbIndex,
+      clauseId:item.clauseId ?? null,
+      order:item.order || 'unknown',
+      confidence:item.confidence || 0,
+      evidence:[...(item.evidence || [])],
+      features: tokenFeatures(tokens[item.objectIndex])
+    });
+    graph.dependencies.push({from:item.verbIndex,to:item.objectIndex,relation:'object',confidence:item.confidence||0});
+    graph.protectedRelations.push({type:'object',verbIndex:item.verbIndex,tokenIndex:item.objectIndex,confidence:item.confidence||0});
+  }
+
+  for (let i = 0; i < legacyRoles.length; i += 1) {
+    const role = legacyRoles[i];
+    if (!role) continue;
+    const entry = {tokenIndex:i, role:role.role, confidence:role.confidence || 0,
+      evidence:[...(role.evidence || [])], headIndex:Number.isInteger(role.headIndex)?role.headIndex:null,
+      clauseId:role.clauseId ?? context.syntax?.tokenClause?.[i] ?? null};
+    graph.nodes.push(entry);
+    if (role.role === 'topic' || role.role === 'subject' || role.role === 'inna-subject' || role.role === 'kana-subject') graph.topics.push(entry);
+    if (role.role === 'predicate' || role.role === 'inna-predicate' || role.role === 'kana-predicate') graph.predicates.push(entry);
+    if (role.role === 'adjective' || role.role === 'hal' || role.role === 'apposition' || role.role === 'emphasis') graph.modifiers.push(entry);
+  }
+
+  // توسيع محافظ للأدوار الاسمية والموصولة دون تغيير الدور القديم.
+  for (const clause of graph.clauses) {
+    const start = clause.start ?? 0, end = clause.end ?? tokens.length;
+    const first = tokens[start];
+    if (!first) continue;
+    const verbs = [];
+    for (let i = start; i < end; i += 1) if (bestVerb(tokens[i])) verbs.push(i);
+
+    // جملة اسمية: مبتدأ + خبر، بشرط غياب عامل ناسخ قوي.
+    if (clause.kind === 'nominal' && !INNA_PARTICLES.has(first.morph?.core) && !isKanaSurface(first.morph?.core)) {
+      const topicIndex = start;
+      if (isStrongNominalCandidate(first) && !legacyRoles[topicIndex]) {
+        graph.topics.push({tokenIndex:topicIndex, role:'topic', confidence:0.91,
+          evidence:['V2432-direct-nominal-topic','clause-start'], clauseId:clause.id});
+      }
+      const topicEnd = v2432NominalUnit(context, topicIndex, end).end;
+      for (let j = topicEnd; j < end; j += 1) {
+        if (bestVerb(tokens[j]) || tokens[j].type === 'punct') break;
+        if (isNominal(tokens[j]) && !tokens[j].morph?.segments?.preposition && !INNA_PARTICLES.has(tokens[j].morph?.core)) {
+          if (!legacyRoles[j]) graph.predicates.push({tokenIndex:j, role:'predicate', confidence:0.88,
+            evidence:['V2432-nominal-predicate','same-clause'], headIndex:topicIndex, clauseId:clause.id});
+          break;
+        }
+      }
+    }
+
+    // SVO/VSO: تعزيز الربط القائم عند وجود فاعل محلي/مفعول صريح.
+    for (const vi of verbs) {
+      const sr = context.syntax.subjectRelations?.find(x => x.verbIndex === vi);
+      const or = context.syntax.objectRelations?.find(x => x.verbIndex === vi && Number.isInteger(x.objectIndex));
+      if (sr) graph.dependencies.push({from:vi,to:sr.subjectIndex,relation:'subject-local',confidence:Math.max(sr.confidence||0,0.94)});
+      if (or) graph.dependencies.push({from:vi,to:or.objectIndex,relation:'object-local',confidence:Math.max(or.confidence||0,0.94)});
+    }
+
+    // صلة الموصول: لا تسمح بانتقال أدوار الماتريكس إلى داخل الصلة.
+    if (clause.type === 'relative' && Number.isInteger(clause.markerIndex)) {
+      graph.protectedRelations.push({type:'relative-clause-boundary', markerIndex:clause.markerIndex, clauseId:clause.id, confidence:0.995});
+    }
+    // جملة مصدرية/مفسرة: حماية حدودها من توريث فاعل الماتريكس.
+    if (['masdari','complement'].includes(clause.type)) {
+      graph.protectedRelations.push({type:'subordinate-clause-boundary', clauseId:clause.id, confidence:0.99});
+    }
+  }
+
+  // SVO role expansion: رأس اسمي + نعت/إضافة واضحة ثم فعل.
+  // لا يعتمد على أقرب اسم فقط؛ يشترط بداية محلية للجملة، ورأسًا اسميًا قويًا،
+  // ووحدة اسمية منتهية قبل الفعل، مع غياب عامل ناسخ/موصول محلي.
+  for (const clause of graph.clauses) {
+    if (!['nominal','mixed'].includes(clause.kind) || clause.type === 'relative' || clause.type === 'conditional') continue;
+    const start = clause.start ?? 0, end = clause.end ?? tokens.length;
+    const head = tokens[start];
+    const headNominalish = head && (isStrongNominalCandidate(head)
+      || (head.morph?.segments?.article && !bestVerb(head) && !INNA_PARTICLES.has(head.morph?.core)
+          && !isKanaSurface(head.morph?.core) && !RELATIVE_PRONOUNS[head.morph?.core]));
+    if (!head || !headNominalish || bestVerb(head)
+        || INNA_PARTICLES.has(head.morph?.core) || isKanaSurface(head.morph?.core)) continue;
+    if (legacyRoles[start] && ['subject','topic','inna-subject','kana-subject'].includes(legacyRoles[start].role)) continue;
+    let unitEnd = start + 1;
+    const unitMembers = [start];
+    while (unitEnd < end) {
+      const t = tokens[unitEnd];
+      if (!t || bestVerb(t) || t.type === 'punct' || INNA_PARTICLES.has(t.morph?.core) || isKanaSurface(t.morph?.core)) break;
+      const nominalish = isNominal(t) || (t.morph?.segments?.article && !canonicalPrepositionCore(t)
+        && !t.morph?.segments?.conjunction && !bestVerb(t));
+      if (!nominalish) break;
+      // نعدّ الكلمة ضمن الوحدة فقط إذا كانت نعتًا/مضافًا إليه/اسمًا ظاهرًا؛
+      // لا نعبر أدوات أو حدودًا نحوية.
+      unitMembers.push(unitEnd);
+      unitEnd += 1;
+    }
+    const unit = {headIndex:start,end:unitEnd,members:unitMembers};
+    let vi = unit.end;
+    while (vi < end && (SUBJECT_SKIP_ADVERBS.has(tokens[vi].morph?.core) || VERBAL_PARTICLES.has(tokens[vi].morph?.core))) vi += 1;
+    if (vi >= end || !bestVerb(tokens[vi])) continue;
+    const existing = graph.subjects.find(x => x.verbIndex === vi);
+    if (existing) continue;
+    const blocked = graph.protectedRelations.some(x => x.type === 'relative-clause-boundary'
+      && Number.isInteger(x.markerIndex) && x.markerIndex >= start && x.markerIndex < vi);
+    if (blocked) continue;
+    const confidence = unit.members.length > 1 ? 0.982 : 0.975;
+    const rawFeatures = tokenFeatures(head);
+    const derivedFeatures = v2432SurfaceNominalFeatures(head);
+    const features = {
+      ...rawFeatures,
+      gender: rawFeatures.gender || derivedFeatures.gender,
+      number: rawFeatures.number || derivedFeatures.number,
+      confidence: Math.max(rawFeatures.confidence || 0, derivedFeatures.confidence || 0)
+    };
+    const relationConfidence = Math.min(0.985, Math.max(confidence, features.confidence || 0));
+    const relation = {tokenIndex:start, verbIndex:vi, clauseId:clause.id, order:'SVO', confidence:relationConfidence,
+      evidence:['V2432-expanded-role-graph','clause-initial-nominal','nominal-unit-before-verb',
+        unit.members.length > 1 ? 'adjective-or-idafa-unit' : 'single-head', 'surface-agreement-features'],
+      features};
+    graph.subjects.push(relation);
+    graph.dependencies.push({from:vi,to:start,relation:'subject-expanded-svo',confidence});
+    graph.protectedRelations.push({type:'subject',verbIndex:vi,tokenIndex:start,confidence});
+  }
+
+  // استمرارية الفاعل بين العطف لا تُثبت إلا كاحتمال، ولا تُسجل subject قطعيًا.
+  for (let i = 1; i < tokens.length - 1; i += 1) {
+    const connector = stripDiacritics(tokens[i].morph?.core || tokens[i].clean || '');
+    if (!V2432_COORDINATORS.has(connector)) continue;
+    const left = tokens[i - 1], right = tokens[i + 1];
+    if (!left || !right || left.sentence !== right.sentence) continue;
+    if (bestVerb(right) || !isStrongNominalCandidate(right)) continue;
+    const prior = graph.subjects.slice().reverse().find(x => x.tokenIndex < i && x.verbIndex < i && x.confidence >= 0.95);
+    if (!prior) continue;
+    // فاعل جديد بعد «ثم/بل/لكن» يمنع الوراثة؛ الواو/الفاء تسمحان باحتمال استمرارية فقط.
+    const continuationAllowed = connector === 'و' || connector === 'ف';
+    graph.protectedRelations.push({type:continuationAllowed ? 'subject-continuity-candidate' : 'new-subject-barrier',
+      connector, from:prior.tokenIndex, to:right.index, confidence:continuationAllowed?0.76:0.995});
+  }
+
+  graph.nodes.sort((a,b)=>a.tokenIndex-b.tokenIndex);
+  return graph;
+}
+
+function v2432RoleBasedAgreementRecall(context, findings) {
+  const out = [...(findings || [])];
+  const seen = new Set(out.map(f => `${f.index}|${f.length}|${f.replacement}`));
+  const graph = context.syntax?.roleGraphV2432;
+  if (!graph) return out;
+
+  // استدعاء محافظ للغاية: نُحسن الاستدعاء فقط إذا كان الفاعل/الرأس مثبتًا سابقًا
+  // بعلاقة مستقلة، ولا توجد حدود محمية أو قراءة موازية.
+  for (const subject of graph.subjects) {
+    if ((subject.confidence || 0) < 0.975 || (subject.features?.confidence || 0) < 0.84) continue;
+    const token = context.tokens[subject.tokenIndex];
+    const verbToken = context.tokens[subject.verbIndex];
+    const verb = bestVerb(verbToken);
+    if (!token || !verb || token.index === subject.verbIndex) continue;
+    const current = stripDiacritics(token.surface || token.clean || '');
+    const candidates = token.morph?.candidates || [];
+    const isSMP = candidates.some(c=>c.pos==='noun' && c.gender==='m' && c.number==='pl' && (c.confidence||0)>=0.95);
+    const isFeminine = tokenFeatures(token).gender === 'f';
+    if (subject.order === 'SVO' && isSMP && /ين$/u.test(current)) {
+      const replacement = token.surface.replace(/ين$/u,'ون');
+      if (replacement !== token.surface) {
+        const finding = findingFromSpan(context,{startToken:token,replacement,ruleId:'V2432_ROLE_GRAPH_SUBJECT_CASE',type:'نحوي',classification:'syntactic-case',confidence:0.993,
+          explanation:'حُسم الاسم فاعلًا متقدمًا في SVO بأدلة دورية وصرفية مستقلة، وهو جمع مذكر سالم بصيغة الياء؛ تُستعاد علامة الرفع «ون».',
+          evidence:['V2432-RoleGraph','subject:SVO','SMP-nominative-recall','multi-evidence'],safe:false,
+          metadata:{subjectIndex:subject.tokenIndex,verbIndex:subject.verbIndex,relationConfidence:subject.confidence,order:'SVO',reviewed:true}});
+        const key=`${finding.index}|${finding.length}|${finding.replacement}`;
+        if (!seen.has(key)) {seen.add(key);out.push(finding);}
+      }
+    }
+    // جملة SVO مع فاعل مؤنث واضح وفعل مذكر/غير مطابق: لا نُنشئ تصحيحًا هنا
+    // إلا إذا كان المحلل الصرفي للفعل يملك البديل المؤنث قطعًا. هذا المسار يضيف
+    // الاستدعاء فقط، وتظل طبقة القرار الأخيرة صاحبة الكلمة.
+    if (subject.order === 'SVO' && isFeminine && /^3ms$/u.test(String(verb.personCode||''))) {
+      const analyses = verbToken.morph?.verbAnalyses || [];
+      const feminine = analyses.find(a => a.personCode === '3fs' && (a.confidence||0)>=0.97);
+      if (feminine) {
+        const replacement = feminine.surface || verbToken.surface;
+        if (replacement && replacement !== verbToken.surface) {
+          const finding = findingFromSpan(context,{startToken:verbToken,replacement,ruleId:'V2432_ROLE_GRAPH_AGREEMENT',type:'نحوي',classification:'agreement',confidence:0.991,
+            explanation:'الاسم الظاهر حُسم فاعلًا متقدمًا مؤنثًا، وتحليل الفعل الحالي مذكر؛ يوجد توليد صرفي مؤنث مستقل.',
+            evidence:['V2432-RoleGraph','subject:SVO','gender-agreement','multi-evidence'],safe:false,
+            metadata:{subjectIndex:subject.tokenIndex,verbIndex:subject.verbIndex,relationConfidence:subject.confidence,order:'SVO',reviewed:true}});
+          const key=`${finding.index}|${finding.length}|${finding.replacement}`;
+          if (!seen.has(key)) {seen.add(key);out.push(finding);}
+        }
+      }
+    }
+    // العكس: فاعل مذكر مفرد ثابت + فعل مضارع مؤنث. لا نصدر التصحيح إلا في SVO
+    // وبوجود تحليل صرفي مستقل للفعل المذكر.
+    if (subject.order === 'SVO' && !isFeminine && String(subject.features?.number || '') === 'sg'
+        && String(subject.features?.gender || '') === 'm' && /^3fs$/u.test(String(verb.personCode||''))) {
+      const analyses = verbToken.morph?.verbAnalyses || [];
+      const masculine = analyses.find(a => a.personCode === '3ms' && (a.confidence||0)>=0.97);
+      const generatedMasculine = generateVerb(verb.lemma, {tense:'present', personCode:'3ms', mood:verb.mood || 'indicative'});
+      if (masculine || generatedMasculine?.surface) {
+        const replacement = generatedMasculine?.surface || masculine.surface || verbToken.surface;
+        if (replacement && replacement !== verbToken.surface) {
+          const finding = findingFromSpan(context,{startToken:verbToken,replacement,ruleId:'V2432_ROLE_GRAPH_AGREEMENT',type:'نحوي',classification:'agreement',confidence:0.991,
+            explanation:'الاسم الظاهر حُسم فاعلًا متقدمًا مذكرًا مفردًا، وتحليل الفعل الحالي مؤنث؛ يوجد توليد صرفي مذكر مستقل.',
+            evidence:['V2432-RoleGraph','subject:SVO','gender-agreement','multi-evidence'],safe:false,
+            metadata:{subjectIndex:subject.tokenIndex,verbIndex:subject.verbIndex,relationConfidence:subject.confidence,order:'SVO',reviewed:true}});
+          const key=`${finding.index}|${finding.length}|${finding.replacement}`;
+          if (!seen.has(key)) {seen.add(key);out.push(finding);}
+        }
+      }
+    }
+  }
+  return out;
+}
+
 /* ===== MODULE: src/pipeline/analyze.js ===== */
 function statistics(findings, suppressed) {
   const byClassification = {};
@@ -14523,6 +14863,7 @@ function createContext(input, options = {}) {
   context.compoundConjunctions = detectCompoundConjunctions(context);
   context.syntax = analyzeNestedSentences(context);
   context.syntax.roles = resolveNounRoles(context);
+  context.syntax.roleGraphV2432 = v2432BuildRoleGraph(context);
   context.conditionalGovernment = resolveConditionalGovernmentV1(context);
   context.parseTree = buildParseTree(context);
   context.v24Start = v24Start;
@@ -16378,6 +16719,7 @@ function analyze(input, options = {}) {
     v243ExtraFindings = v243ContextualSubjectContinuityRecall(context, v243ExtraFindings);
     v243ExtraFindings = v243Phase2SVOAgreementRecall(context, v243ExtraFindings);
     v243ExtraFindings = v243ContextualAdjectiveRecall(context, v243ExtraFindings);
+    v243ExtraFindings = v2432RoleBasedAgreementRecall(context, v243ExtraFindings);
     rawFindings.push(...v243ExtraFindings);
     context.v243RawAdded = v243ExtraFindings.length;
   }
@@ -16610,6 +16952,7 @@ function analyze(input, options = {}) {
       demonstrativeChainsV1900: context.v1900Chains,
       parseTree: context.parseTree,
       roles: context.syntax.roles,
+      roleGraphV2432: context.syntax.roleGraphV2432,
       suppressed: ranked.suppressed,
       diagnostics
     };
@@ -19025,6 +19368,7 @@ function runDiacritizationSuiteV20(options = {}) {
       phrases: context.phraseAnalysis.phrases,
       clauses: context.syntax.clauses,
       roles: context.syntax.roles,
+      roleGraphV2432: context.syntax.roleGraphV2432,
       objectRelations: context.syntax.objectRelations,
       conditionalGovernment: context.conditionalGovernment,
       resolutionPipeline: context.syntax.resolutionPipeline,
@@ -21927,6 +22271,8 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
   v243HardenedLocalGrammarGuard, v243ContextIntegrityV12, v243ContextualSubjectContinuityRecall, v243ContextualAdjectiveRecall, applyV243HardenedDecisionGate,
   v243Phase2SVOAgreementRecall, v243Phase2ScoreFinding, applyV243Phase2DecisionLayer, V243_PHASE2,
   grammarSafetyV243: Object.freeze({version:'1.1', apply:applyV243GrammarSafety, inspect:inspectV243Safety, hardenedGuard:v243HardenedLocalGrammarGuard}),
+  V2432_ROLE_GRAPH: Object.freeze({version:V2432_ROLE_GRAPH_VERSION, build:v2432BuildRoleGraph, recall:v2432RoleBasedAgreementRecall}),
+  V2432_ROLE_GRAPH: Object.freeze({version:V2432_ROLE_GRAPH_VERSION, build:v2432BuildRoleGraph, recall:v2432RoleBasedAgreementRecall}),
   V24_3_PRO: Object.freeze({version:META.version, edition:META.edition, analyze:analyze, validate:runRegressionSuiteV2431, safety:inspectV243Safety, phase2:V243_PHASE2, regressionV243:runRegressionSuiteV243, regressionV2431:runRegressionSuiteV2431}),
   V24_PRO: Object.freeze({version: META.version, edition: META.edition,
     analyze: analyzePRO, validate: runFullSuiteV23,
