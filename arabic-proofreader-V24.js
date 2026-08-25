@@ -442,6 +442,12 @@
       root.V24_3_2 = api;
       root.ArabicProofreaderV24_3_3 = api;
       root.V24_3_3 = api;
+      root.ArabicProofreaderV24_4 = api;
+      root.ArabicProofreaderV24_4PRO = api;
+      root.V24_4 = api;
+      root.ArabicProofreaderV24_5 = api;
+      root.ArabicProofreaderV24_5PRO = api;
+      root.V24_5 = api;
     // علامة جاهزية صريحة يمكن للقالب فحصها قبل بدء التدقيق
     root.__ARABIC_PROOFREADER_V18_READY__ = true;
     root.__ARABIC_PROOFREADER_V19_READY__ = true;
@@ -454,6 +460,8 @@
       root.__ARABIC_PROOFREADER_V24_3_READY__ = true;
       root.__ARABIC_PROOFREADER_V24_3_2_READY__ = true;
       root.__ARABIC_PROOFREADER_V24_3_3_READY__ = true;
+      root.__ARABIC_PROOFREADER_V24_4_READY__ = true;
+      root.__ARABIC_PROOFREADER_V24_5_READY__ = true;
     root.__ARABIC_PROOFREADER_VERSION__ = api.META.version;
       root.__ARABIC_PROOFREADER_V24_3_2_READY__ = true;
       root.__ARABIC_PROOFREADER_V24_3_3_READY__ = true;
@@ -478,12 +486,12 @@
 const META = Object.freeze({
   name: 'Arabic Proofreader Hybrid Engine',
   nameArabic: 'محرك التدقيق العربي الهجين — النسخة الاحترافية الشاملة',
-  version: '24.4.1',
-  edition: 'PRO-FINAL-V24.4.1-SAFE-VETO',
+  version: '24.4.2',
+  edition: 'PRO-FINAL-V24.4.2-GRAMMAR-COMPLETENESS',
   language: 'ar',
-  release: 'V24.3.1 PRO FINAL — Root-cause context hardening + safe abstention',
+  release: 'V24.4.2 FINAL — V24.5 Grammar Completeness / Context-Aware / Safe',
   stability: 'stable',
-  releaseDate: '2026-08-24',
+  releaseDate: '2026-08-25',
   governingPrinciple: 'عدم إفساد الجملة الصحيحة أهم من اكتشاف خطأ إضافي — توليدُ الاقتراح لا يعني قبولَه.',
   compat: Object.freeze({
     baseVersion: '20.0.0',
@@ -617,7 +625,8 @@ const META = Object.freeze({
     'v24.3.1-root-cause-safe-governance-1.0',
     'v24.3.1-jussive-person-integrity-1.0',
     'v24.3.1-diptote-pos-firewall-1.0',
-    'v24.3.1-commencement-indicative-firewall-1.0'
+    'v24.3.1-commencement-indicative-firewall-1.0',
+    'v24.5-grammar-completeness-1.0', 'v24.5-semantic-punctuation-1.0'
   ]),
   resolverVersions: Object.freeze({
     ClauseIsolationResolver: '1.2',
@@ -686,7 +695,11 @@ const META = Object.freeze({
     V2421DeterministicDedup: '1.0',
     V2421ReviewedConflictPriority: '1.0',
       V2432ExpandedRoleGraph: '1.0',
-      V2432RoleBasedAgreementRecall: '1.0'
+      V2432RoleBasedAgreementRecall: '1.0',
+    V245GrammarCompleteness: '1.0', SemanticPunctuationCompleteness: '1.0',
+    LaNafyaLilJinsResolver: '1.0', PassiveNaibFaelResolver: '1.0',
+    DitransitiveVerbResolver: '1.0', MafoolMaahResolver: '1.0',
+    RelativeClauseCompletenessResolver: '1.0', JussiveCompletenessResolver: '1.0'
   }),
   releaseCriteria: Object.freeze({
     precision: 0.99,
@@ -14164,6 +14177,663 @@ function diacriticsConflictRuleV20(context) {
   return out;
 }
 
+
+/* ============================================================================
+ * V24.5 Grammar Completeness Layer 1.0
+ * Integrated into V24.4 FINAL as an additive, conservative completeness layer.
+ * Principles:
+ *   1) Root-cause/context first; no low-level rule may override a stronger role.
+ *   2) Grammar findings are never auto-applied by this layer.
+ *   3) Punctuation/spacing fixes are safe only when surface-local and deterministic.
+ *   4) Ambiguous structures abstain.
+ * ========================================================================== */
+
+const V245_LAYER_VERSION = '1.0';
+const V245_NO_GENDER_BENDING = Object.freeze(new Set([
+  'كتب','علم','درس','بحث','عمل','جاء','وصل','ذهب','حضر','قرأ','فاز','نجح'
+]));
+
+function v245Core(t) {
+  return stripDiacritics(String(t?.morph?.core || t?.morph?.analyzedCore || t?.clean || t?.surface || ''));
+}
+function v245Surface(t) { return String(t?.surface || t?.clean || ''); }
+function v245IsWord(t) { return Boolean(t && t.type === 'word'); }
+function v245NextWord(tokens, i, step = 1) {
+  for (let j = i + step; j < tokens.length; j += 1) {
+    if (tokens[j]?.type === 'punct') continue;
+    return tokens[j];
+  }
+  return null;
+}
+function v245PrevWord(tokens, i, step = 1) {
+  let seen = 0;
+  for (let j = i - 1; j >= 0; j -= 1) {
+    if (tokens[j]?.type === 'punct') continue;
+    seen += 1;
+    if (seen === step) return tokens[j];
+  }
+  return null;
+}
+function v245Nominal(t) {
+  return Boolean(t && (isNominal(t) || (typeof isNisbaSubjectCandidate === 'function' && isNisbaSubjectCandidate(t))));
+}
+function v245WordAfter(tokens, i) {
+  return v245NextWord(tokens, i, 1);
+}
+function v245WordBefore(tokens, i) {
+  return v245PrevWord(tokens, i, 1);
+}
+function v245SentenceBreakBetween(tokens, a, b) {
+  if (!tokens[a] || !tokens[b]) return true;
+  if (tokens[a].sentence !== tokens[b].sentence) return true;
+  for (let k = a + 1; k < b; k += 1) {
+    const s = v245Surface(tokens[k]);
+    if (/[.!؟؛]/u.test(s)) return true;
+  }
+  return false;
+}
+function v245CaseFinding(context, token, expected, ruleId, confidence, explanation, evidence = [], metadata = {}) {
+  if (!token) return null;
+  const observed = observedCase(token);
+  if (!observed || caseMatches(observed, expected)) return null;
+  const replacement = inflectTokenCase(token, expected, {onlyWhenVisible: true});
+  if (!replacement || stripDiacritics(replacement) !== stripDiacritics(v245Surface(token))
+      || replacement === v245Surface(token)) {
+    return null;
+  }
+  return findingFromSpan(context, {
+    startToken: token,
+    replacement,
+    ruleId,
+    type: 'نحوي',
+    classification: 'syntax',
+    confidence,
+    explanation,
+    evidence,
+    safe: false,
+    metadata: { ...metadata, observedCase: observed, expectedCase: expected }
+  });
+}
+function v245MoodFinding(context, token, replacement, ruleId, explanation, evidence = []) {
+  if (!token || !replacement || replacement === v245Surface(token)) return null;
+  return findingFromSpan(context, {
+    startToken: token,
+    replacement,
+    ruleId,
+    type: 'نحوي',
+    classification: 'verb-mood',
+    confidence: 0.975,
+    explanation,
+    evidence,
+    safe: false,
+    metadata: { originalMood: 'indicative', expectedMood: 'jussive' }
+  });
+}
+
+/* --- 1. لا النافية للجنس ----------------------------------------------- */
+const V245_LA_NAFIYA = new Set(['لا']);
+function v245LaNafyaLilJinsRule(context) {
+  const out = [];
+  const {tokens} = context;
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (v245Core(tokens[i]) !== 'لا') continue;
+    const n = v245NextWord(tokens, i);
+    if (!n || n.sentence !== tokens[i].sentence || !v245Nominal(n)) continue;
+    const core = v245Core(n);
+    if (!core || n.morph?.definite || /^(أي|من|ما)$/u.test(core)) continue;
+    if (bestVerb(n)) continue;
+    const prev = v245PrevWord(tokens, i);
+    if (prev && ['واو','ف'].includes(v245Core(prev))) continue;
+    const f = v245CaseFinding(
+      context, n, 'accusative', 'V245_LA_NAFIYA_LIL_JINS_CASE', 0.985,
+      '«لا» النافية للجنس تعمل عمل «إنّ» عند نفي الجنس؛ اسمها المفرد أو المضاف يُنصب.',
+      ['particle:لا', 'indefinite-nominal-after-la', 'genus-negation'],
+      {particleIndex:i, structure:'la-nafya-lil-jins'}
+    );
+    if (f) out.push(f);
+  }
+  return out;
+}
+
+/* --- 2. نائب الفاعل في المبني للمجهول --------------------------------- */
+const V245_PASSIVE_STEMS = Object.freeze(new Set([
+  'كتب','قرأ','ضرب','فتح','كسر','حفظ','شرح','ذكر','سمع','فهم','أكل','شرب','باع',
+  'قال','قيل','دعا','دعي','رأى','أخذ','ترك','منح','كرم','استخدم','استعمل','اكتشف',
+  'يكتب','يقرأ','يضرب','يفتح','يكسر','يحفظ','يشرح','يذكر','يسمع','يفهم'
+]));
+function v245LooksPassive(t) {
+  const s = v245Surface(t);
+  const c = v245Core(t);
+  if (/[ُِْ]/u.test(s) && /[ُِ]/u.test(s)) {
+    if (/(?:ا|و|ي)?[ُِ][^ا]{0,3}[ُِ]/u.test(s)) return true;
+  }
+  if (/^يُ[^ا]+[َُ]/u.test(s) || /^تُ[^ا]+[َُ]/u.test(s) || /^نُ[^ا]+[َُ]/u.test(s) || /^أُ[^ا]+[َُ]/u.test(s)) return true;
+  return false;
+}
+function v245PassiveNaibFaelRule(context) {
+  const out = [];
+  const {tokens} = context;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const v = tokens[i];
+    const vb = v245LooksPassive(v);
+    const bv = bestVerb(v);
+    if (!vb && !bv) continue;
+    // Prefer explicit diacritized passive evidence; otherwise require a reviewed passive surface.
+    const explicitPassive = vb;
+    if (!explicitPassive) continue;
+    const n = v245NextWord(tokens, i);
+    if (!n || n.sentence !== v.sentence || !v245Nominal(n)) continue;
+    const f = v245CaseFinding(
+      context, n, 'nominative', 'V245_PASSIVE_NAIB_FAEL_CASE', 0.985,
+      'في المبني للمجهول يرتفع نائب الفاعل، فلا يُنصب بالفتحة.',
+      ['passive-voice-confirmed', 'postverbal-nominal'],
+      {verbIndex:i}
+    );
+    if (f) out.push(f);
+  }
+  return out;
+}
+
+/* --- 3. الأفعال المتعدية إلى مفعولين ---------------------------------- */
+const V245_DITRANSITIVE = Object.freeze(new Set([
+  'أعطى','أعطيت','أعطى','منح','وهب','كسا','ألبس','سأل','علّم','علم','أخبر','أنبأ',
+  'نبأ','نبّأ','حدّث','سمى','سمّى','اتخذ','جعل','صيّر','ترك','أرى','أسمع'
+]));
+function v245DitransitiveRule(context) {
+  const out = [];
+  const {tokens} = context;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const v = v245Core(tokens[i]);
+    if (!V245_DITRANSITIVE.has(v)) continue;
+    const verbSurface = v245Surface(tokens[i]);
+    const likelyThirdPersonActive = /^(?:أعطى|أعطت|أعطيا|أعطتا|أعطوا|أعطين|منح|منحَ|منحت|منحوا|وهب|وهبت|وهبوا|علّم|علم|أخبر|أنبأ|نبّأ|سمّى|سمى|اتخذ|جعل|صيّر|ترك|أرى|أسمع)$/u.test(verbSurface);
+    const firstOrSecondPerson = /(?:تُ|تَ|تِ|نا|تم|تن|تما)$/u.test(verbSurface);
+    if (likelyThirdPersonActive && !firstOrSecondPerson) continue;
+    const o1 = v245NextWord(tokens, i);
+    const o2 = o1 ? v245NextWord(tokens, o1.index) : null;
+    if (!o1 || !o2 || o1.sentence !== tokens[i].sentence || o2.sentence !== tokens[i].sentence) continue;
+    if (!v245Nominal(o1) || !v245Nominal(o2) || bestVerb(o1) || bestVerb(o2)) continue;
+    const f1 = v245CaseFinding(
+      context, o1, 'accusative', 'V245_DITRANSITIVE_OBJECT1_CASE', 0.97,
+      'الفعل متعدٍّ إلى مفعولين؛ المفعول الأول منصوب.',
+      ['ditransitive-verb', 'object-1'], {verbIndex:i, object2Index:o2.index}
+    );
+    const f2 = v245CaseFinding(
+      context, o2, 'accusative', 'V245_DITRANSITIVE_OBJECT2_CASE', 0.97,
+      'الفعل متعدٍّ إلى مفعولين؛ المفعول الثاني منصوب.',
+      ['ditransitive-verb', 'object-2'], {verbIndex:i, object1Index:o1.index}
+    );
+    if (f1) out.push(f1);
+    if (f2) out.push(f2);
+  }
+  return out;
+}
+
+/* --- 4. المفعول معه ---------------------------------------------------- */
+function v245MafoolMaahRule(context) {
+  const out = [];
+  const {tokens} = context;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const c = v245Core(tokens[i]);
+    if (c !== 'و') continue;
+    const prev = v245PrevWord(tokens, i);
+    const next = v245NextWord(tokens, i);
+    if (!prev || !next || prev.sentence !== next.sentence) continue;
+    if (!bestVerb(prev) || !v245Nominal(next)) continue;
+    // Conservative: only if next is not a plausible conjunct matching prev's role.
+    const nextCase = observedCase(next);
+    if (!nextCase || nextCase === 'accusative') continue;
+    const f = v245CaseFinding(
+      context, next, 'accusative', 'V245_MAFOOL_MAAH_CASE', 0.965,
+      'بعد فعل تام قد تأتي الواو للمعية؛ الاسم بعدها يُعامل مفعولًا معه إذا لم تثبت دلالة العطف.',
+      ['verb-before-waw', 'nominal-after-waw', 'no-conjunct-agreement-evidence'],
+      {wawIndex:i}
+    );
+    if (f) out.push(f);
+  }
+  return out;
+}
+
+/* --- 5. المفعول لأجله -------------------------------------------------- */
+const V245_MASADIR_CAUSE = new Set([
+  'طلبًا','خوفًا','رجاءً','حرصًا','رغبةً','حفاظًا','احترامًا','ابتغاءً','طمعًا',
+  'حبًا','كرهًا','شكرًا','استجابةً','تقديرًا','تجنبًا','منعًا','سعيًا','رغبة','حرص'
+]);
+function v245MafoolLiAjlihCompletenessRule(context) {
+  const out = [];
+  const {tokens} = context;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const t = tokens[i], c = v245Surface(t), bare = v245Core(t);
+    if (!(V245_MASADIR_CAUSE.has(c) || V245_MASADIR_CAUSE.has(bare))) continue;
+    const prev = v245PrevWord(tokens, i);
+    if (!prev || !bestVerb(prev) || prev.sentence !== t.sentence) continue;
+    const f = v245CaseFinding(
+      context, t, 'accusative', 'V245_MAFOOL_LI_AJLIH_COMPLETENESS', 0.98,
+      'المصدر الدال على سبب الفعل يأتي منصوبًا مفعولًا لأجله إذا استوفى شروطه.',
+      ['cognate-cause-masdar','preceding-finite-verb'], {verbIndex:prev.index}
+    );
+    if (f) out.push(f);
+  }
+  return out;
+}
+
+/* --- 6. نائب الفاعل/الفعل المبني للمجهول مع صيغ حاسمة ------------------ */
+const V245_REVIEWED_PASSIVE_SURFACES = new Set([
+  'كُتِبَ','قُرِئَ','شُرِحَ','كُسِرَ','فُتِحَ','حُفِظَ','ذُكِرَ','سُمِعَ',
+  'أُكِلَ','شُرِبَ','أُخِذَ','تُرِكَ','كُرِّمَ','أُعْلِنَ','يُكْتَبُ','يُقْرَأُ',
+  'يُشْرَحُ','يُحْفَظُ','تُكْرَمُ','تُكْرَّمُ'
+]);
+function v245ReviewedPassiveRule(context) {
+  const out = [];
+  const {tokens} = context;
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (!V245_REVIEWED_PASSIVE_SURFACES.has(v245Surface(tokens[i]))) continue;
+    const n = v245NextWord(tokens, i);
+    if (!n || !v245Nominal(n)) continue;
+    const f = v245CaseFinding(context, n, 'nominative', 'V245_REVIEWED_PASSIVE_NAIB_FAEL', 0.995,
+      'صيغة المبني للمجهول مؤكدة بالتشكيل؛ ما بعدها نائب فاعل مرفوع.',
+      ['reviewed-passive-surface'], {verbIndex:i});
+    if (f) out.push(f);
+  }
+  return out;
+}
+
+/* --- 7. صلة الموصول: استكمال المطابقة في الصيغة الملتبسة --------------- */
+const V245_RELATIVE_FORMS = Object.freeze(new Map([
+  ['الذي',{gender:'m',number:'sg'}],['التي',{gender:'f',number:'sg'}],
+  ['اللذان',{gender:'m',number:'du'}],['اللذين',{gender:'m',number:'du'}],
+  ['اللتان',{gender:'f',number:'du'}],['اللتين',{gender:'f',number:'du'}],
+  ['الذين',{gender:'m',number:'pl'}],['اللاتي',{gender:'f',number:'pl'}],
+  ['اللائي',{gender:'f',number:'pl'}],['اللواتي',{gender:'f',number:'pl'}]
+]));
+function v245RelativeAgreementCompletenessRule(context) {
+  const out = [];
+  const {tokens} = context;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const info = V245_RELATIVE_FORMS.get(v245Core(tokens[i]));
+    if (!info) continue;
+    const antecedent = v245PrevWord(tokens, i);
+    const verb = v245NextWord(tokens, i);
+    if (!antecedent || !verb || antecedent.sentence !== tokens[i].sentence) continue;
+
+    // If the verb carries an attached object/subject pronoun, do not infer agreement
+    // from the relative pronoun alone: «التي قدمتها» and «الذين أعددنها» are valid.
+    if (verb.morph?.segments?.enclitic) continue;
+
+    const vb = bestVerb(verb);
+    if (!vb || vb.person !== 3 || vb.tense === 'imperative') continue;
+
+    // If a later nominal exists in the same clause, it may be the overt subject:
+    // «الذي تقوم عليه نهضة الأمم» => «تقوم» agrees with «نهضة», not with «الذي».
+    let overtSubjectAfterVerb = false;
+    for (let j = verb.index + 1; j < tokens.length; j += 1) {
+      if (tokens[j].sentence !== verb.sentence || /[.!؟؛]/u.test(v245Surface(tokens[j]))) break;
+      if (V245_RELATIVE_FORMS.has(v245Core(tokens[j]))) break;
+      if (v245Nominal(tokens[j]) && !bestVerb(tokens[j])) { overtSubjectAfterVerb = true; break; }
+    }
+    if (overtSubjectAfterVerb) continue;
+
+    let desired = null;
+    if (info.number === 'pl') desired = info.gender === 'f' ? '3fp' : '3mp';
+    else if (info.number === 'du') desired = info.gender === 'f' ? '3df' : '3dm';
+    else desired = info.gender === 'f' ? '3fs' : '3ms';
+    if (!desired || vb.personCode === desired) continue;
+
+    const replacement = conjugateVerb(vb.lemma, vb.tense, desired);
+    if (!replacement || stripDiacritics(replacement) === stripDiacritics(v245Surface(verb))) continue;
+    const f = findingFromSpan(context,{
+      startToken:verb,replacement,
+      ruleId:'V245_RELATIVE_CLAUSE_AGREEMENT',
+      type:'نحوي',classification:'relative-clause',confidence:0.955,
+      explanation:'فعل صلة الموصول يُراجع مع جنس وعدد الاسم الموصول فقط عند غياب ضمير متصل أو فاعل ظاهر داخل الصلة.',
+      evidence:['relative-pronoun-form','relative-verb-person','no-attached-pronoun','no-overt-subject-after-verb'],
+      safe:false,metadata:{relativeIndex:i,antecedentIndex:antecedent.index}
+    });
+    if (f) out.push(f);
+  }
+  return out;
+}
+
+/* --- 8. لا الناهية + لام الأمر: جزم الأفعال الخمسة -------------------- */
+const V245_NAHYA = new Set(['لا']);
+const V245_LAM_AMR = new Set(['ل']);
+function v245JussiveReplacement(t) {
+  const s = v245Surface(t);
+  const v = bestVerb(t);
+  if (/ون$/u.test(s)) return s.replace(/ون$/u,'وا');
+  if (/ان$/u.test(s) && v && (v.number === 'du' || v.person === 3 || v.person === 2)) return s.replace(/ان$/u,'ا');
+  return null;
+}
+function v245JussiveCompletenessRule(context) {
+  const out = [];
+  const {tokens} = context;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const c = v245Core(tokens[i]);
+    if (c !== 'لا' && c !== 'ل') continue;
+    const v = v245NextWord(tokens, i);
+    if (!v || v.sentence !== tokens[i].sentence) continue;
+    const surfaceVerbLike = /(?:ون|ين)$/u.test(v245Surface(v)) || /^(?:ي|ت|ن|أ)[\u0621-\u064A]+$/u.test(v245Core(v));
+    if (!surfaceVerbLike) continue;
+    const verb = bestVerb(v) || {tense:'present', person:3, number:/ون$/u.test(v245Surface(v))?'pl':null};
+    const replacement = v245JussiveReplacement(v);
+    if (!replacement) continue;
+    const afterVerb = v245NextWord(tokens, v.index);
+    const afterFeatures = afterVerb ? tokenFeatures(afterVerb) : null;
+    const verbPlural = /(?:ون|ين)$/u.test(v245Surface(v)) || /(?:ون|ين)$/u.test(v245Core(v));
+    const afterMatchesPluralSubject = Boolean(afterVerb && verbPlural && afterFeatures?.number === 'pl');
+    const likelyObjectAfterVerb = Boolean(afterVerb
+      && !afterMatchesPluralSubject
+      && (afterVerb.morph?.segments?.enclitic || afterVerb.morph?.definite === true || afterFeatures?.number === 'sg'));
+    const nahyaConfirmed = c === 'لا' && (verb.tense === 'present' || verb.tense === undefined) && likelyObjectAfterVerb;
+    const lamConfirmed = c === 'ل';
+    if (lamConfirmed || nahyaConfirmed) {
+      const f = v245MoodFinding(context,v,replacement,
+        c === 'لا' ? 'V245_LA_NAHIYA_JUSSIVE' : 'V245_LAM_AMR_JUSSIVE',
+        c === 'لا' ? '«لا» الناهية تجزم المضارع، ومن علامات الجزم حذف النون في الأفعال الخمسة.' :
+                     'لام الأمر تجزم المضارع، ومن علامات الجزم حذف النون في الأفعال الخمسة.',
+        [c === 'لا' ? 'nahya-particle' : 'lam-amr','five-verb-nun-deletion']);
+      if (f) out.push(f);
+    }
+  }
+  return out;
+}
+
+/* --- 9. التعجب: «ما أفعل» و«أفعل به» ---------------------------------- */
+function v245TaajjubCompletenessRule(context) {
+  const out = [];
+  const {tokens} = context;
+  const taajjubForms = new Set(['أجمل','أحسن','أروع','أكبر','أصغر','أشد','أعظم','أسرع','أبطأ','أفضل','أقوى','أوضح','أصدق','أكرم','أنفع','أيسر']);
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (v245Core(tokens[i]) !== 'ما') continue;
+    const v = v245NextWord(tokens, i);
+    const obj = v ? v245NextWord(tokens, v.index) : null;
+    if (!v || !obj || !(v245Nominal(obj) || obj.morph?.segments?.article)) continue;
+    if (!taajjubForms.has(v245Core(v))) continue;
+    // Explicit exclamation ending or known «ما أفعل» construction.
+    const endIndex = obj.originalEnd;
+    const tail = String(context.original||'').slice(endIndex).trimStart();
+    const nextTok = tokens[obj.index + 1];
+    const explicitExclamatory = /[!؟]$/u.test(tail) || Boolean(nextTok && /^(?:!|؟)$/u.test(v245Surface(nextTok)));
+    if (!explicitExclamatory) continue;
+    const s = v245Surface(v);
+    let repl = s;
+    if (/[ٌُ]$/u.test(s)) repl = s.slice(0,-1) + (s.endsWith('ُ') ? 'َ' : 'ًا');
+    else if (!/[َِّْ]/u.test(s)) repl = s + 'َ';
+    else if (/ٌ$/u.test(s)) repl = s.slice(0,-1)+'ًا';
+    if (repl === s) continue;
+    const f = findingFromSpan(context,{
+      startToken:v,replacement:repl,ruleId:'V245_TAAJJUB_MA_AFAALA',
+      type:'نحوي',classification:'syntax',confidence:0.995,
+      explanation:'في صيغة التعجب «ما أفعلَ»، فعل التعجب يكون مفتوح العين.',
+      evidence:['ما-التعجبية','reviewed-afala-form','exclamatory-context'],safe:false
+    });
+    if (f) out.push(f);
+  }
+  return out;
+}
+
+/* --- 10. الأعداد: 11–19 والعدد الترتيبي ------------------------------------------------ */
+const V245_CARDINAL_CASE = Object.freeze({
+  'أحد عشر':'أحد عشر','اثنا عشر':'اثنا عشر','اثني عشر':'اثني عشر','ثلاثة عشر':'ثلاثة عشر',
+  'أربعة عشر':'أربعة عشر','خمسة عشر':'خمسة عشر','ستة عشر':'ستة عشر',
+  'سبعة عشر':'سبعة عشر','ثمانية عشر':'ثمانية عشر','تسعة عشر':'تسعة عشر'
+});
+function v245NumberCompletenessRule(context) {
+  const out = [];
+  const {tokens} = context;
+  for (let i = 0; i < tokens.length - 2; i += 1) {
+    const first = v245Core(tokens[i]);
+    const second = v245Core(tokens[i+1]);
+    const counted = tokens[i+2];
+    if (!/^(ثلاث|ثلاثة|أربع|أربعة|خمس|خمسة|ست|ستة|سبع|سبعة|ثمان|ثمانية|تسع|تسعة)$/u.test(first)) continue;
+    if (second !== 'عشر' || !v245Nominal(counted)) continue;
+    const f = v245CaseFinding(context, tokens[i+1], 'accusative', 'V245_NUMBER_13_19_SECOND_PART_CASE', 0.985,
+      'الجزء الثاني من الأعداد 13–19 مبني على الفتح؛ الرسم بالحركات الظاهرة يجب ألا يكون مرفوعًا.',
+      ['number-13-19','second-part-accusative-form'], {numberStart:i,countedIndex:counted.index});
+    if (f) out.push(f);
+  }
+  return out;
+}
+
+/* --- 11. «ما» disambiguation guards ------------------------------------ */
+const V245_MA_NON_NOMINAL = new Set(['ما','ماذا']);
+function v245MaDisambiguationGuardRule(context) {
+  const out=[];
+  const {tokens}=context;
+  for(let i=0;i<tokens.length;i++){
+    const c=v245Core(tokens[i]);
+    if(c!=='ما') continue;
+    const n=v245NextWord(tokens,i);
+    if(!n || !v245Nominal(n)) continue;
+    // «ما» الاستفهامية/الموصولة لا تعمل عمومًا عمل كان؛ abstain instead of proposing.
+    if(n.morph?.definite && v245Core(n)!=='اسم') {
+      // no correction: this guard exists to suppress aggressive legacy findings
+      context.v245NoGuess = context.v245NoGuess || [];
+      context.v245NoGuess.push({index:i,reason:'ma-function-ambiguous'});
+    }
+  }
+  return out;
+}
+
+/* --- 12. البدل والعطف: استكمال المطابقة في حالات بسيطة ----------------- */
+function v245BadalAndConjunctionCompletenessRule(context) {
+  const out=[];
+  const {tokens}=context;
+  for(let i=1;i<tokens.length-1;i++){
+    const a=tokens[i-1], b=tokens[i], c=tokens[i+1];
+    if(!a||!b||!c||a.sentence!==b.sentence||b.sentence!==c.sentence) continue;
+    if(v245Core(b)=== 'و' && v245Nominal(a) && v245Nominal(c)) {
+      const ac=v245CaseFinding(context,c,observedCase(a)||'nominative','V245_COORDINATION_CASE_COMPLETENESS',0.965,
+        'المعطوف يتبع المعطوف عليه في الإعراب عند ثبوت العطف الصريح.',
+        ['explicit-conjunction','same-syntactic-level']);
+      if(ac) out.push(ac);
+    }
+  }
+  return out;
+}
+
+/* --- 13. Semantic punctuation completeness ----------------------------- */
+function v245PunctuationCompletenessRule(context) {
+  const out=[];
+  const text=String(context.original||'');
+  const pushText=(start,length,replacement,ruleId,confidence,explanation,evidence=[],safe=true)=>{
+    if(length < 0) return;
+    out.push(findingFromTextSpan(context,{
+      normalizedStart:start,normalizedEnd:start+length,replacement,
+      ruleId,type:'ترقيم',classification:'punctuation',confidence,explanation,evidence,safe,
+      metadata:{v245:true}
+    }));
+  };
+  // Spacing before punctuation marks.
+  const before=/\s+([،؛:؟!.,])/gu;
+  let m;
+  while((m=before.exec(text))){
+    const start=m.index, repl=m[1];
+    const ws=m[0].length-1;
+    pushText(start,ws,'','V245_PUNCTUATION_NO_SPACE_BEFORE',0.999,
+      'لا توضع مسافة قبل علامة الترقيم العربية في الكتابة المعيارية.',
+      ['punct-spacing-before'],true);
+  }
+  // Required single space after sentence punctuation when followed by Arabic text/digit.
+  const after=/([،؛:؟!])(?=[\u0600-\u06FF\u0660-\u0669A-Za-z0-9])/gu;
+  while((m=after.exec(text))){
+    pushText(m.index+1,0,' ','V245_PUNCTUATION_SPACE_AFTER',0.999,
+      'توضع مسافة بعد علامة الترقيم قبل الكلمة التالية.',
+      ['punct-spacing-after'],true);
+  }
+  // Multiple question/exclamation marks normalize conservatively.
+  const multi=/([؟!])\1{1,}/gu;
+  while((m=multi.exec(text))){
+    pushText(m.index,m[0].length,m[1],'V245_PUNCTUATION_DUPLICATE_MARKS',0.995,
+      'تكرار علامة الاستفهام أو التعجب يُختصر إلى علامة واحدة في التدقيق المعياري.',
+      ['duplicate-punctuation'],true);
+  }
+  // Question sentence ending with a full stop.
+  const q=/((?:هل|أ|متى|أين|كيف|لماذا|ماذا|من|كم|أي)\s+[^.!؟\n]{1,120})\./gu;
+  while((m=q.exec(text))){
+    const pos=m.index+m[0].length-1;
+    pushText(pos,1,'؟','V245_QUESTION_MARK_COMPLETENESS',0.995,
+      'صيغة السؤال الواضحة تنتهي بعلامة الاستفهام «؟».',
+      ['interrogative-opening','sentence-final-period'],true);
+  }
+  // Common quotation/colon spacing.
+  const colon=/((?:قال|يقول|أجاب|أوضح|كتب|سأل))\s+:/gu;
+  while((m=colon.exec(text))){
+    const cpos=m.index+m[0].length-1;
+    pushText(cpos-1,1,'','V245_COLON_NO_PRESPACE',0.999,
+      'لا توضع مسافة قبل النقطتين بعد فعل القول أو البيان.',
+      ['quote-introducing-colon'],true);
+  }
+  // Balanced quotes/brackets — diagnostic only, no destructive correction.
+  const pairs=[['«','»'],['“','”'],['(',')'],['[',']'],['{','}']];
+  for(const [op,cl] of pairs){
+    const a=[...text].filter(ch=>ch===op).length;
+    const b=[...text].filter(ch=>ch===cl).length;
+    if(a!==b){
+      const idx=Math.max(text.lastIndexOf(op), text.lastIndexOf(cl));
+      if(idx>=0) pushText(idx,1,text[idx],'V245_UNBALANCED_DELIMITER',0.93,
+        `عدم توازن زوج العلامة «${op}${cl}» يستحق المراجعة اليدوية.`,
+        ['delimiter-balance'],false);
+    }
+  }
+  return out;
+}
+
+/* --- 14. ألوان الترقيم الدلالي ------------------------------------------------ */
+function v245PunctuationSemanticSuggestionsRule(context) {
+  const out=[];
+  const text=String(context.original||'');
+  const add=(start,len,rep,id,conf,exp,evidence)=>{
+    out.push(findingFromTextSpan(context,{normalizedStart:start,normalizedEnd:start+len,replacement:rep,
+      ruleId:id,type:'ترقيم',classification:'punctuation',confidence:conf,explanation:exp,evidence,safe:false}));
+  };
+  // Semicolon before causal connectors is suggestion-only.
+  const r=/([^؛.\n]{8,120})\s*،\s*(لأن|لذلك|ولهذا|ومن ثم)/gu;
+  let m;
+  while((m=r.exec(text))){
+    const commaPos=m.index+m[1].length + m[0].slice(m[1].length).search('،');
+    if(commaPos>=m.index) add(commaPos,1,'؛','V245_SEMANTIC_SEMICOLON_SUGGESTION',0.91,
+      'الفاصلة المنقوطة قد تكون أنسب بين جملتين طويلتين أو بين جملة وسببها.',
+      ['long-clause-boundary','causal-connector']);
+  }
+  // Vocative comma is a style-level suggestion.
+  const voc=/\b(يا|أيا|هيا)\s+([\u0600-\u06FF]{2,})(?=\s+\S)/gu;
+  while((m=voc.exec(text))){
+    const p=m.index+m[0].length;
+    if(text[p]!== '،') add(p,0,'،','V245_VOCATIVE_COMMA_SUGGESTION',0.93,
+      'تُستعمل الفاصلة بعد لفظ المنادى في الكتابة المعيارية.',
+      ['vocative','post-vocative-punctuation']);
+  }
+  return out;
+}
+
+/* --- 15. Style-safe punctuation/ellipsis -------------------------------- */
+function v245EllipsisAndDashRule(context) {
+  const out=[];
+  const text=String(context.original||'');
+  const add=(s,l,r,id,c,e,ev)=>out.push(findingFromTextSpan(context,{normalizedStart:s,normalizedEnd:s+l,replacement:r,ruleId:id,type:'أسلوب',classification:'spacing',confidence:c,explanation:e,evidence:ev,safe:true}));
+  let m;
+  const ell=/\.{3,}/gu;
+  while((m=ell.exec(text))) add(m.index,m[0].length,'…','V245_ELLIPSIS_NORMALIZATION',0.995,'تُوحَّد علامة الحذف إلى «…».',['ellipsis']);
+  const dash=/\s*--\s*/gu;
+  while((m=dash.exec(text))) add(m.index,m[0].length,'—','V245_EM_DASH_NORMALIZATION',0.97,'تُوحَّد الشرطة الاعتراضية إلى «—» في النثر العربي عند استعمالها بدل «--».',['em-dash']);
+  return out;
+}
+
+/* --- 16. Complete role-governance registry ------------------------------ */
+const V245_COMPLETENESS_RULES = Object.freeze([
+  'V245_LA_NAFIYA_LIL_JINS_CASE',
+  'V245_PASSIVE_NAIB_FAEL_CASE',
+  'V245_REVIEWED_PASSIVE_NAIB_FAEL',
+  'V245_DITRANSITIVE_OBJECT1_CASE',
+  'V245_DITRANSITIVE_OBJECT2_CASE',
+  'V245_MAFOOL_MAAH_CASE',
+  'V245_MAFOOL_LI_AJLIH_COMPLETENESS',
+  'V245_RELATIVE_CLAUSE_AGREEMENT',
+  'V245_LA_NAHIYA_JUSSIVE',
+  'V245_LAM_AMR_JUSSIVE',
+  'V245_TAAJJUB_MA_AFAALA',
+  'V245_NUMBER_13_19_TAMYIZ_CASE',
+  'V245_COORDINATION_CASE_COMPLETENESS',
+  'V245_PUNCTUATION_NO_SPACE_BEFORE',
+  'V245_PUNCTUATION_SPACE_AFTER',
+  'V245_PUNCTUATION_DUPLICATE_MARKS',
+  'V245_QUESTION_MARK_COMPLETENESS',
+  'V245_COLON_NO_PRESPACE',
+  'V245_SEMANTIC_SEMICOLON_SUGGESTION',
+  'V245_VOCATIVE_COMMA_SUGGESTION',
+  'V245_ELLIPSIS_NORMALIZATION',
+  'V245_EM_DASH_NORMALIZATION'
+]);
+
+function runV245GrammarCompleteness(context) {
+  const out=[];
+  const run=(fn)=>{
+    try { out.push(...(fn(context)||[])); } catch (e) {
+      context.v245Errors = context.v245Errors || [];
+      context.v245Errors.push({rule:fn.name,error:String(e)});
+    }
+  };
+  run(v245LaNafyaLilJinsRule);
+  run(v245ReviewedPassiveRule);
+  run(v245PassiveNaibFaelRule);
+  run(v245DitransitiveRule);
+  run(v245MafoolMaahRule);
+  run(v245MafoolLiAjlihCompletenessRule);
+  run(v245RelativeAgreementCompletenessRule);
+  run(v245JussiveCompletenessRule);
+  run(v245TaajjubCompletenessRule);
+  run(v245NumberCompletenessRule);
+  run(v245MaDisambiguationGuardRule);
+  run(v245BadalAndConjunctionCompletenessRule);
+  run(v245PunctuationCompletenessRule);
+  run(v245PunctuationSemanticSuggestionsRule);
+  run(v245EllipsisAndDashRule);
+  // deterministic dedup within this layer
+  return deduplicateFindings(out);
+}
+
+const V245_GOLD_REGRESSIONS = Object.freeze([
+  {id:'la-gender-1', text:'لا رجلٌ في البيت.', expect:'رجل'},
+  {id:'ditrans-1', text:'أعطيتُ الطالبُ كتابًا.', expect:'الطالب'},
+  {id:'passive-1', text:'كُتِبَ الدرسَ.', expect:'الدرس'},
+  {id:'mafool-li-1', text:'درستُ طلبًا للعلم.', expect:'طلبًا'},
+  {id:'relative-1', text:'جاء الذين نجحَ.', expect:'نجحوا'},
+  {id:'nahya-1', text:'لا تهملون واجبكم.', expect:'تهملوا'},
+  {id:'taajjub-1', text:'ما أجملُ السماء!', expect:'أجملَ'},
+  {id:'number-1', text:'قرأتُ ثلاثةَ عشرُ كتابًا.', expect:'عشرَ'}
+]);
+const V245_BLOCK_REGRESSIONS = Object.freeze([
+  'لا الطالبُ غائبٌ.',
+  'لا يكتبون الطلابُ الآن.',
+  'قرأ الطالبُ الكتابَ.',
+  'ما أجملُ من هذا؟',
+  'الذين حضروا ناجحون.',
+  'أعطى المعلمُ الطالبَ كتابًا.',
+  'كُتِبَ الدرسُ.',
+  'هل تذهب؟',
+  'قال: اذهب.',
+  '«نص صحيح»'
+]);
+function runRegressionSuiteV245(options={}) {
+  const failures=[]; let passed=0;
+  for(const item of V245_GOLD_REGRESSIONS){
+    const r=analyze(item.text,{safeMode:true,...options});
+    const hit=(r.findings||[]).some(f=>String(f.replacement||'').includes(item.expect))
+      || String(r.corrected||'').includes(item.expect);
+    if(hit) passed++; else failures.push({id:item.id,kind:'missed-error',text:item.text,expected:item.expect,got:(r.findings||[]).map(f=>`${f.original}>${f.replacement}`)});
+  }
+  for(const text of V245_BLOCK_REGRESSIONS){
+    const r=analyze(text,{safeMode:true,...options});
+    const harmful=(r.findings||[]).filter(f=>f.ruleId && String(f.ruleId).startsWith('V245_')
+      && f.classification!=='spacing' && f.classification!=='punctuation' && f.severity!=='STYLE');
+    if(!harmful.length) passed++; else failures.push({kind:'false-positive',text,findings:harmful.map(f=>({ruleId:f.ruleId,original:f.original,replacement:f.replacement,confidence:f.confidence}))});
+  }
+  return {version:META.version,total:V245_GOLD_REGRESSIONS.length+V245_BLOCK_REGRESSIONS.length,
+    passed,failed:failures.length,failures,valid:failures.length===0};
+}
+
+
 const RULE_PIPELINE = Object.freeze([
   {id: 'verbSubjectFrames', run: verbSubjectFrameRuleV1900},
   {id: 'objectCase', run: objectCaseRule},
@@ -14213,6 +14883,7 @@ const RULE_PIPELINE = Object.freeze([
   {id: 'numberTamyizCompletion', run: numberTamyizCompletionRuleV1890},
   {id: 'agreementResolver', run: agreementResolverRuleV19},
   {id: 'dependencyTree', run: dependencyTreeResolverRuleV19},
+  {id: 'v245GrammarCompleteness', run: runV245GrammarCompleteness},
   {id: 'commonErrors', run: commonErrorsRuleV1880},
   {id: 'punctuation', run: punctuationRule},
   {id: 'spacing', run: spacingRuleV1880},
@@ -14264,6 +14935,15 @@ function contextValidateFinding(context, finding) {
     validation.valid = false;
     validation.reason = 'protected-span';
     validation.checks.push('url-email-code-date-protection');
+  }
+
+  // V24.5 compatibility veto: imperative «اكتب» is a valid command and must not
+  // be rewritten by a generic reviewed-orthography candidate («اكتب → أكتب»).
+  if (String(finding.ruleId || '').startsWith('V2434_REVIEWED_ORTHOGRAPHY')
+      && stripDiacritics(String(finding.original || '')) === 'اكتب') {
+    validation.valid = false;
+    validation.reason = 'v245-imperative-command-protection';
+    validation.checks.push('imperative-context-guard');
   }
 
   if (finding.ruleId === 'NUMBER_ONE_TWO_AGREEMENT_V18') {
@@ -22726,6 +23406,26 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
   V24_3_4_CONTEXT_INTELLIGENCE: Object.freeze({version:'24.3.4'}),
   v2433BuildRoleGraph, v2433SafeRoleRecall, v2433RelativeSubjectRecall, v2433LegacyStructuralVeto, applyV2433RoleDecision, v2433ValidateSubjectFinding,
   V24_3_PRO: Object.freeze({version:META.version, edition:META.edition, analyze:analyze, validate:runRegressionSuiteV2431, safety:inspectV243Safety, phase2:V243_PHASE2, regressionV243:runRegressionSuiteV243, regressionV2431:runRegressionSuiteV2431}),
+  // ── V24.5 Grammar Completeness Layer ──
+  V245_LAYER_VERSION,
+  V245_COMPLETENESS_RULES,
+  V245_GOLD_REGRESSIONS, V245_BLOCK_REGRESSIONS, runRegressionSuiteV245,
+  v245LaNafyaLilJinsRule, v245ReviewedPassiveRule, v245PassiveNaibFaelRule,
+  v245DitransitiveRule, v245MafoolMaahRule, v245MafoolLiAjlihCompletenessRule,
+  v245RelativeAgreementCompletenessRule, v245JussiveCompletenessRule,
+  v245TaajjubCompletenessRule, v245NumberCompletenessRule,
+  v245PunctuationCompletenessRule, v245PunctuationSemanticSuggestionsRule,
+  grammarCompletenessV245: Object.freeze({
+    version: V245_LAYER_VERSION,
+    rules: V245_COMPLETENESS_RULES,
+    analyze: runV245GrammarCompleteness,
+    regression: runRegressionSuiteV245
+  }),
+  V24_5_GRAMMAR_COMPLETENESS: Object.freeze({
+    version:'1.0', edition:'V24.5-GRAMMAR-COMPLETENESS',
+    analyze:runV245GrammarCompleteness, regression:runRegressionSuiteV245
+  }),
+  V24_4_FINAL: Object.freeze({version:META.version, edition:META.edition, analyze, correct, suggest, validate, grammarCompleteness:runV245GrammarCompleteness}),
   V24_PRO: Object.freeze({version: META.version, edition: META.edition,
     analyze: analyzePRO, validate: runFullSuiteV23,
     benchmark: runArabicProBenchmarkV23,
