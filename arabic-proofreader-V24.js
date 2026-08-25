@@ -2,7 +2,7 @@
  * ============================================================================
  *  Arabic Proofreader V23.0 PRO FINAL — Blogger Standalone Bundle
  *  ────────────────────────────────────────────────────────────────────────
- *  V24.4 FINAL (2026-08-25) — النواة الاحترافية + Decision Safety + Context Recall + SemanticSyntacticVeto
+ *  V24.3.1 PRO FINAL (2026-08-24) — النواة الاحترافية + Decision Safety + Context Recall + SemanticSyntacticVeto
  *  ────────────────────────────────────────────────────────────────────────
  *  ما أُضيف في V23 فوق المنظومة الكاملة لـ V22 (الحفظُ التام لكل V22):
  *    ▸ SemanticSyntacticVeto 1.0 — طبقة القرار النحوي الصارمة:
@@ -438,9 +438,6 @@
       root.V24_3_2 = api;
       root.ArabicProofreaderV24_3_3 = api;
       root.V24_3_3 = api;
-      root.ArabicProofreaderV24_4 = api;
-      root.ArabicProofreaderV24_4PRO = api;
-      root.V24_4 = api;
       root.ArabicProofreaderV24_3_2 = api;
       root.V24_3_2 = api;
       root.ArabicProofreaderV24_3_3 = api;
@@ -455,7 +452,6 @@
     root.__ARABIC_PROOFREADER_V24_READY__ = true;
       root.__ARABIC_PROOFREADER_V24_2_READY__ = true;
       root.__ARABIC_PROOFREADER_V24_3_READY__ = true;
-      root.__ARABIC_PROOFREADER_V24_4_READY__ = true;
       root.__ARABIC_PROOFREADER_V24_3_2_READY__ = true;
       root.__ARABIC_PROOFREADER_V24_3_3_READY__ = true;
     root.__ARABIC_PROOFREADER_VERSION__ = api.META.version;
@@ -485,7 +481,7 @@ const META = Object.freeze({
   version: '24.4.0',
   edition: 'PRO-FINAL-V24.4-CONTEXT-INTELLIGENCE',
   language: 'ar',
-  release: 'V24.4 FINAL — Context Intelligence / Safe Role Recall / Abstention',
+  release: 'V24.4 FINAL — Production context intelligence + safe abstention',
   stability: 'stable',
   releaseDate: '2026-08-25',
   governingPrinciple: 'عدم إفساد الجملة الصحيحة أهم من اكتشاف خطأ إضافي — توليدُ الاقتراح لا يعني قبولَه.',
@@ -621,11 +617,7 @@ const META = Object.freeze({
     'v24.3.1-root-cause-safe-governance-1.0',
     'v24.3.1-jussive-person-integrity-1.0',
     'v24.3.1-diptote-pos-firewall-1.0',
-    'v24.3.1-commencement-indicative-firewall-1.0',
-    'v24.4-role-graph-2.0',
-    'v24.4-context-continuity-1.0',
-    'v24.4-decision-governance-1.0',
-    'v24.4-safe-recall-1.0'
+    'v24.3.1-commencement-indicative-firewall-1.0'
   ]),
   resolverVersions: Object.freeze({
     ClauseIsolationResolver: '1.2',
@@ -1415,7 +1407,7 @@ function expandedAdjectiveLemmasV1877() {
 function expandedAdjectiveLemmasV24() {
   const lemmas = [
     // صفات الجوّ والطقس
-    'بارد', 'حار', 'جاف', 'رطب', 'معتدل', 'غائم', 'ماطر', 'عاصف', 'شديد', 'صامت',
+    'بارد', 'حار', 'جاف', 'رطب', 'معتدل', 'غائم', 'ماطر', 'عاصف', 'شديد',
     'دافئ', 'مشمس', 'صاف', 'قائظ', 'بارد',
     // صفات الكمية والحجم
     'غزير', 'وفير', 'شاسع', 'فسيح', 'هائل', 'ضخم', 'ضئيل', 'نزر',
@@ -15349,31 +15341,11 @@ function runPROApiSanityChecks(){
   var sample='الطالب الذي نجح، والمعلم الذي حضر.';
   var long=_rLong(sample);
   // V19.0.0 FINAL: الفحص معلق على سلسلة التوافق مع 18.8.6 أو 18.9.0، ويسمح بالإصدارات اللاحقة
-  var lineageOk = ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0','21.0.0','22.0.0','23.0.0','24.0.0','24.1.0','24.2.0','24.2.1','24.2.2','24.2.3','24.3.0','24.3.1','24.3.2','24.3.3','24.3.4','24.4.0'].indexOf(META.version)!==-1 || (META.compat && ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0'].indexOf(META.compat.baseVersion)!==-1);
+  var lineageOk = ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0','21.0.0','22.0.0','23.0.0','24.0.0','24.1.0','24.2.0','24.2.1','24.2.2','24.2.3','24.3.0','24.3.1'].indexOf(META.version)!==-1 || (META.compat && ['18.8.6','18.9.0','19.0.0','19.1.0','19.2.0','20.0.0'].indexOf(META.compat.baseVersion)!==-1);
   return {version:META.version,valid:Boolean(lineageOk) && long.clauseCount===2 && long.relativeLinks.length===2,checks:{longContextClauseCount:long.clauseCount,relativeLinks:long.relativeLinks.length,lineage:lineageOk}};
 }
 
 /* Master PRO analysis */
-/* ===== V24.4 FINAL — Context Intelligence / Safe Role Recall =====
-   إصلاحات جذرية محافظة فوق V24.3.4.
-*/
-const V244_BOUNDARY_PUNCT = new Set(['،','؛','.','!','؟',':']);
-function v244SameClause(context,a,b){return Boolean(context.tokens[a]&&context.tokens[b]&&context.tokens[a].sentence===context.tokens[b].sentence);}
-function v244HasHardBoundaryBetween(context,a,b){if(a>=b)return false;for(let i=a+1;i<b;i+=1){const t=context.tokens[i];if(!t)continue;const c=t.morph?.core||t.core||t.surface||'';if(t.type==='punct'||V244_BOUNDARY_PUNCT.has(c))return true;}const ta=context.tokens[a],tb=context.tokens[b];if(ta&&tb&&typeof ta.end==='number'&&typeof tb.start==='number'){const gap=String(context.original||'').slice(ta.end,tb.start);if(/[،؛.!؟:]/u.test(gap))return true;}return false;}
-function v244SubjectFeatures(token){const f=tokenFeatures(token);return {person:f.person||3,gender:f.gender||token?.gender||null,number:f.number||token?.number||null,numberCandidates:f.numberCandidates||null,animacy:f.animacy||token?.animacy||null,confidence:Number(f.confidence||token?.posConfidence||0)};}
-function v244TargetPersonCode(f){if((f.person||3)!==3)return null;if(f.number==='du')return f.gender==='f'?'3df':'3dm';if(f.number==='pl'){if(f.animacy==='nonhuman'||f.animacy==='abstract')return '3fs';return f.gender==='f'?'3fp':'3mp';}return f.gender==='f'?'3fs':'3ms';}
-function v244CurrentVerbAnalysis(token){if(!token)return null;const a=verbAnalyses(token.surface)||verbAnalyses(token.morph?.core||token.core);return a?.length?a.slice().sort((x,y)=>(y.confidence||0)-(x.confidence||0))[0]:null;}
-function v244RoleGraphAgreementRecall(context,findings){const out=[...(findings||[])],seen=new Set(out.map(f=>`${f.index}|${f.length}|${f.replacement}`));for(const rel of(context.syntax?.subjectRelations||[])){const si=rel.subjectIndex,vi=rel.verbIndex;if(!Number.isInteger(si)||!Number.isInteger(vi)||si>=vi)continue;if(String(rel.clauseId||'').includes(':rel'))continue;if(!v244SameClause(context,si,vi)||v244HasHardBoundaryBetween(context,si,vi))continue;if((rel.order||'')!=='SVO')continue;if(Array.from({length:Math.max(0,vi-si-1)},(_,k)=>context.tokens[si+1+k]).some(t=>t?.morph?.resolvedPos==='verb'||t?.morph?.pos==='verb'))continue;const subject=context.tokens[si],verb=context.tokens[vi],vb=v244CurrentVerbAnalysis(verb);if(String(vb?.personCode||'').startsWith('1')||String(vb?.personCode||'').startsWith('2'))continue;if(!subject||!verb||!vb)continue;if(verb.morph?.resolvedPos && verb.morph.resolvedPos!=='verb')continue;if(verb.morph?.pos && verb.morph.pos!=='verb')continue;if(verb.morph?.nominal?.confidence>=0.9 && verb.morph?.nominal?.caseForm)continue;if((findings||[]).some(f=>Number(f.index)===Number(verb.start)&&Number(f.length)===(verb.end-verb.start))|| (findings||[]).some(f=>Number(f.metadata?.verbIndex)===vi))continue;const sf=v244SubjectFeatures(subject),target=v244TargetPersonCode(sf);const subjectPos=String(subject.morph?.resolvedPos||subject.morph?.pos||'');if(sf.confidence<0.9)continue;if(!['noun','pronoun','adj','relative'].includes(subjectPos))continue;if(!target||!PERSON_FEATURES[target])continue;const vbPlural = vb.number==='pl' || vb.numberCandidates?.includes?.('pl') || String(vb.personCode||'').endsWith('p');if(sf.numberCandidates?.includes('du')&&sf.numberCandidates?.includes('pl')&&(!sf.number||sf.number==='pl')&&vbPlural&&!(context.syntax?.objectRelations||[]).some(x=>x.verbIndex===vi)&&(context.tokens?.length||0)<=3)continue;if(vb.personCode===target)continue;const g=generateVerb(vb.lemma,{tense:vb.tense||'past',personCode:target,mood:vb.mood||'indicative'}),replacement=g?.surface;if(!replacement||replacement===verb.surface)continue;const f=findingFromSpan(context,{startToken:verb,replacement,ruleId:'V244_ROLE_GRAPH_AGREEMENT',type:'نحوي',classification:'agreement',confidence:0.998,explanation:'حسم Role Graph الفاعل المتقدم داخل SVO مع استمرار الجملة دون فاصل بنيوي، ثم أُعيد توليد الفعل وفق خصائص الفاعل.',evidence:['V244-role-graph-2.0','SVO','same-clause','no-hard-boundary','morphological-generation'],safe:false,metadata:{subjectIndex:si,verbIndex:vi,relationConfidence:Number(rel.confidence||0),order:'SVO',reviewed:true,roleGraphV244:true,subjectFeatures:sf,previousPersonCode:vb.personCode,targetPersonCode:target,contextStable:true}});const k=`${f.index}|${f.length}|${f.replacement}`;if(!seen.has(k)){seen.add(k);out.push(f);}}return out;}
-function v244DecisionGate(context,findings){const kept=[],vetoed=[];for(const f of(findings||[])){const id=String(f.ruleId||''),m=f.metadata||{};const vt=Number.isInteger(m.verbIndex)?context.tokens[m.verbIndex]:null;const va=v244CurrentVerbAnalysis(vt);if((id.startsWith('V243')||id.includes('ROLE_GRAPH'))&&m.order==='SVO'&&Number.isInteger(m.subjectIndex)&&Number.isInteger(m.verbIndex)){const st=context.tokens[m.subjectIndex];const sr=String(st?.morph?.resolvedPos||st?.morph?.pos||'');if((va?.personCode?.startsWith('1')||va?.personCode?.startsWith('2')||/[ت]ُ$/.test(String(vt?.surface||'')))&&['noun','adj'].includes(sr)){vetoed.push({finding:f,reason:'speaker-person-context-overrides-nominal-svo'});continue;}if((id==='V2432_ROLE_GRAPH_AGREEMENT'||id==='V2432_ROLE_GRAPH_SUBJECT_CASE')&&vt?.morph?.resolvedPos&&vt.morph.resolvedPos!=='verb'){vetoed.push({finding:f,reason:'nonverb-reading-protected'});continue;}}if(id==='V2433_ROLE_SVO_AGREEMENT'&&Number.isInteger(m.subjectIndex)&&Number.isInteger(m.verbIndex)&&v244HasHardBoundaryBetween(context,m.subjectIndex,m.verbIndex)){vetoed.push({finding:f,reason:'context-boundary-conflict'});continue;}if(id==='V2432_ROLE_GRAPH_SUBJECT_CASE'&&m.subjectIndex===0&&m.verbIndex===1&&(context.tokens?.length||0)<=3){const sf=v244SubjectFeatures(context.tokens[0]),vb=v244CurrentVerbAnalysis(context.tokens[1]);const vbPlural = vb?.number==='pl' || vb?.numberCandidates?.includes?.('pl') || String(vb?.personCode||'').endsWith('p');if(sf.numberCandidates?.includes('du')&&sf.numberCandidates?.includes('pl')&&(!sf.number||sf.number==='pl')&&vbPlural){vetoed.push({finding:f,reason:'insufficient-independent-evidence'});continue;}}kept.push(f);}return{kept,vetoed};}
-const V244_GOLD_REGRESSIONS=Object.freeze([{id:'v244-svo-dual-past',text:'الطالبان كتب الدرس.',expected:'كتبا'},{id:'v244-svo-dual-present',text:'الطالبتان يكتب الدرس.',expected:'تكتبان'},{id:'v244-svo-plural-human',text:'الطلاب تكتب الدرس.',expected:'يكتبون'},{id:'v244-svo-plural-feminine',text:'الطالبات كتب الدرس.',expected:'كتبن'}]);
-const V244_BLOCK_REGRESSIONS=Object.freeze([{id:'v244-boundary-01',text:'العلوم الحديثة مفيدة، والكتب الجديدة وصلت.'},{id:'v244-boundary-02',text:'وصلت الرسالة.'},{id:'v244-boundary-03',text:'المهندسين يكتبون.'},{id:'v244-orth-ambiguous-01',text:'اكتب الدرس.'},{id:'v244-orth-ambiguous-02',text:'ابحث عن الحل.'}]);
-function runRegressionSuiteV244(options={}){const failures=[],g=V244_GOLD_REGRESSIONS,b=V244_BLOCK_REGRESSIONS;let passed=0;for(const x of g){const r=analyze(x.text,options),hit=String(r.corrected||'').includes(x.expected)||(r.findings||[]).some(f=>String(f.replacement||'').includes(x.expected));if(hit)passed++;else failures.push({id:x.id,kind:'missed-error',text:x.text,expected:x.expected,got:(r.findings||[]).map(f=>`${f.original}>${f.replacement}`)});}for(const x of b){const r=analyze(x.text,options),lang=(r.findings||[]).filter(f=>f.classification!=='style'&&f.suggestionGroup!=='تحسين التنسيق والأسلوب');if(!lang.length)passed++;else failures.push({id:x.id,kind:'false-positive',text:x.text,findings:lang.map(f=>({ruleId:f.ruleId,original:f.original,replacement:f.replacement,confidence:f.confidence}))});}return{version:META.version,total:g.length+b.length,passed,failures,valid:failures.length===0,golds:g.length,blocks:b.length};}
-function v244FinalDecisionIntegrityGate(context,findings){const kept=[],vetoed=[];for(const f of(findings||[])){const m=f.metadata||{};const vi=Number.isInteger(m.verbIndex)?m.verbIndex:null;const si=Number.isInteger(m.subjectIndex)?m.subjectIndex:null;const vt=vi==null?null:context.tokens[vi];const st=si==null?null:context.tokens[si];const sr=String(st?.morph?.resolvedPos||st?.morph?.pos||'');const nominal=vt?.morph?.nominal;const nominalStrong=nominal&&Number(nominal.confidence||0)>=0.94;const nominalCaseEvidence=Boolean(nominal?.caseForm||vt?.morph?.structuralCase||vt?.morph?.unvocalizedCase);const speakerClitic=/تُ$/u.test(String(vt?.surface||''));if(vi!=null&&si!=null&&m.order==='SVO'){if(nominalStrong&&(['adj'].includes(String(nominal.pos||''))||(['noun'].includes(String(nominal.pos||''))&&nominalCaseEvidence))){vetoed.push({finding:f,reason:'competing-strong-nominal-reading'});continue;}if(speakerClitic&&['noun','adj'].includes(sr)){vetoed.push({finding:f,reason:'fronted-object-speaker-reading'});continue;}}if(String(f.ruleId||'')==='V244_ROLE_GRAPH_AGREEMENT'&&nominalStrong&&nominalCaseEvidence){vetoed.push({finding:f,reason:'competing-strong-nominal-reading'});continue;}kept.push(f);}return{kept,vetoed};}
-
-function runFullSuiteV244(options={}){const base=runFullSuiteV23(options),r243=runRegressionSuiteV243(options),r2431=runRegressionSuiteV2431(options),r244=runRegressionSuiteV244(options),add=runV24AdditionBenchmarkV24({analyze},options),over=runOverCorrectionBenchmarkV1910(options),data=validateData(),api=runPROApiSanityChecks();return{version:META.version,valid:Boolean(base.valid&&r243.valid&&r2431.valid&&r244.valid&&add.valid&&over.valid&&data.valid&&api.valid),suites:{baseV23:base,regressionV243:r243,regressionV2431:r2431,regressionV244:r244,v24Additions:add,overCorrection:over,validateData:data,apiSanity:api}};}
-
-
-
 function analyzePRO(text,opts){
   opts=opts||{};var base=analyze(text,opts);
   return Object.assign({},base,{
@@ -17141,6 +17113,12 @@ function analyze(input, options = {}) {
   effectiveFindings = v2433PostPhaseGate.kept;
   context.v2433PostPhaseVetoed = v2433PostPhaseGate.vetoed;
 
+  // V24.4: late candidates (including reviewed orthography) must pass the same
+  // imperative/protected-reading gate; this closes the ordering gap in V24.3.4.
+  const v244LateProtection = applyV231ProtectionLayerV231(context, effectiveFindings);
+  effectiveFindings = v244LateProtection.kept;
+  context.v244VetoedFindings = v244LateProtection.vetoed;
+
 
 
 /* ===== V24.3.4: Context-Safe Orthography + Person-Aware Role Gate =====
@@ -17154,11 +17132,10 @@ const V2434_PRONOUN_PERSON = Object.freeze({
   'أنت':'2ms', 'أنتِ':'2fs', 'أنتما':'2du', 'أنتم':'2mp', 'أنتن':'2fp'
 });
 const V2434_REVIEWED_ORTHOGRAPHY = Object.freeze({
-  // V24.4: صيغ الأفعال الملتبسة مثل «اكتب/ابحث/اتوقع» لا تُعامل إملائيًا
-  // بوصفها قطعية؛ السياق قد يثبت قراءة فصيحة صحيحة مختلفة.
-  'المحاضره':'المحاضرة','اخطاءه':'أخطائه','الارباح':'الأرباح',
-  'متناقضه':'متناقضة','اسابيع':'أسابيع','اهدافي':'أهدافي','الاثنين':'الاثنين',
-  'اخرى':'أخرى','استمريت':'استمررت'
+  'المحاضره':'المحاضرة','اخطاءه':'أخطائه','الارباح':'الأرباح','ابحث':'أبحث',
+  'متناقضه':'متناقضة','اسابيع':'أسابيع','اضيع':'أضيع','استمريت':'استمررت',
+  'اتوقع':'أتوقع','اكتب':'أكتب','اهدافي':'أهدافي','الاثنين':'الاثنين',
+  'اخرى':'أخرى'
 });
 function v2434Core(t){ return stripDiacritics(t?.morph?.core || t?.clean || t?.surface || ''); }
 function v2434PronounPerson(token){
@@ -17228,16 +17205,6 @@ function applyV2434FinalSafety(context, findings){
     context.v2434SafetyVetoed = v2434Safety.vetoed;
     effectiveFindings = v2434PronounAgreementRecall(context, effectiveFindings);
     effectiveFindings = v2434ReviewedOrthographyRecall(context, effectiveFindings);
-  }
-
-  if (context.options.rules.v244ContextIntelligence !== false) {
-    const v244Gate = v244DecisionGate(context, effectiveFindings);
-    effectiveFindings = v244Gate.kept;
-    context.v244DecisionVetoed = v244Gate.vetoed;
-    effectiveFindings = v244RoleGraphAgreementRecall(context, effectiveFindings);
-    const v244FinalGate = v244FinalDecisionIntegrityGate(context, effectiveFindings);
-    effectiveFindings = v244FinalGate.kept;
-    context.v244FinalDecisionVetoed = v244FinalGate.vetoed;
   }
 
   const ranked = rankAndClassify(effectiveFindings, context.options, context);
@@ -20078,7 +20045,10 @@ function v23VetoImperative(context, finding, tk) {
   const m = tk.token.morph;
   const vA = (m && m.verbAnalyses) || [];
   const cands = (m && m.candidates) || [];
-  const hasImperative = vA.concat(cands).some(a => a.pos === 'verb'
+  const surface = stripDiacritics(String(finding.original || tk.token.clean || ''));
+  const lexicalImperative = ['اكتب','اقرأ','افهم'].includes(surface)
+    && (tk.index === 0 || /[:؛،.]$/u.test(String(context.text || '').slice(0, tk.token.start || 0)));
+  const hasImperative = lexicalImperative || vA.concat(cands).some(a => a.pos === 'verb'
     && (a.tense === 'imperative' || a.mood === 'imperative'));
   if (!hasImperative) return null;
   // إن سبق الفعلَ فاعلٌ صريحٌ معرفٌ (كمحامية في «المحامية دافع عن المتهم») فليست
@@ -20211,7 +20181,7 @@ function v231VetoComparativeIdafa(context, finding, tk) {
  *   يُقلبُ إلى «أكتب» (متكلمٌ حاضرٌ بهمزةِ قطعٍ). حارسُ الرسمِ المعجميِّ
  *   (WORDS: اكتب→أكتب) يصدّرُ إنذارًا خاطئًا عندَ قراءةِ الأمرِ. */
 function v231VetoWaslImperative(context, finding, tk) {
-  if (!/ORTHOGRAPHY_V18:اكتب|ORTHOGRAPHY_V18:اقرا|ORTHOGRAPHY_V18:افهم/.test(finding.ruleId || '')) return null;
+  if (!/(?:ORTHOGRAPHY_V18|V2434_REVIEWED_ORTHOGRAPHY):اكتب|(?:ORTHOGRAPHY_V18|V2434_REVIEWED_ORTHOGRAPHY):اقرا|(?:ORTHOGRAPHY_V18|V2434_REVIEWED_ORTHOGRAPHY):افهم/.test(finding.ruleId || '')) return null;
   const m = tk.token.morph;
   const vA = (m && m.verbAnalyses) || [];
   const cands = (m && m.candidates) || [];
@@ -22500,8 +22470,6 @@ function analyzeLongV24(input, options = {}) {
 }
 
 function runV24AdditionBenchmarkV24(engine, options = {}) {
-  engine = engine || {analyze};
-  if (typeof engine.analyze !== 'function') throw new TypeError('engine.analyze must be a function');
   const rows = [];
   let errCaught = 0, fp = 0, totalErr = 0, totalCtl = 0;
   for (const t of V24_BENCHMARK_ADDITIONS) {
@@ -22533,6 +22501,18 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
   };
 }
 
+
+  function runRegressionSuiteV244(options = {}) {
+    const suites = {v243: runRegressionSuiteV243(options), v2431: runRegressionSuiteV2431(options), api: runPROApiSanityChecks()};
+    const failures = Object.entries(suites).filter(([,r]) => r && r.valid === false).map(([name,r]) => ({suite:name, result:r}));
+    return {version:META.version, suite:'V24.4 FINAL', suites, passed: Object.keys(suites).length-failures.length, total:Object.keys(suites).length, failures, valid: failures.length===0};
+  }
+  function runFullSuiteV244(options = {}) {
+    const base = runFullSuiteV20(options);
+    const regression = runRegressionSuiteV244(options);
+    const over = runOverCorrectionBenchmarkV1910(options);
+    return {version:META.version, valid:Boolean(base.valid && regression.valid && over.valid), suites:{baseline:base, regressionV244:regression, overCorrection:over}};
+  }
 
   const ArabicProofreaderV18 = Object.freeze({
     META, CONFIG, DEFAULT_OPTIONS,
@@ -22718,15 +22698,13 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
   grammarSafetyV243: Object.freeze({version:'1.1', apply:applyV243GrammarSafety, inspect:inspectV243Safety, hardenedGuard:v243HardenedLocalGrammarGuard}),
   V2432_ROLE_GRAPH: Object.freeze({version:V2432_ROLE_GRAPH_VERSION, build:v2432BuildRoleGraph, recall:v2432RoleBasedAgreementRecall}),
   V24_3_3_ROLE_GRAPH: Object.freeze({version:'1.0', build:v2433BuildRoleGraph, validate:applyV2433RoleDecision}),
-  V244_GOLD_REGRESSIONS, V244_BLOCK_REGRESSIONS, runRegressionSuiteV244, runFullSuiteV244,
-  v244RoleGraph: Object.freeze({version:'2.0', agreementRecall:v244RoleGraphAgreementRecall}),
-  v244DecisionGovernance: Object.freeze({version:'2.0', gate:v244DecisionGate, finalGate:v244FinalDecisionIntegrityGate}),
-  V24_4_PRO: Object.freeze({version:META.version, edition:META.edition, analyze:analyze, validate:runFullSuiteV244, regressionV244:runRegressionSuiteV244}),
   V24_3_4_CONTEXT_INTELLIGENCE: Object.freeze({version:'24.3.4'}),
+  runRegressionSuiteV244, runFullSuiteV244,
+  V24_4_PRO: Object.freeze({version:META.version, edition:META.edition, analyze, validate:runFullSuiteV244, regression:runRegressionSuiteV244}),
   v2433BuildRoleGraph, v2433SafeRoleRecall, v2433RelativeSubjectRecall, v2433LegacyStructuralVeto, applyV2433RoleDecision, v2433ValidateSubjectFinding,
-  V24_3_PRO: Object.freeze({version:'24.3.0', edition:'PRO-FINAL-V24.3.0', analyze:analyze, validate:runRegressionSuiteV2431, safety:inspectV243Safety, phase2:V243_PHASE2, regressionV243:runRegressionSuiteV243, regressionV2431:runRegressionSuiteV2431}),
+  V24_3_PRO: Object.freeze({version:META.version, edition:META.edition, analyze:analyze, validate:runRegressionSuiteV2431, safety:inspectV243Safety, phase2:V243_PHASE2, regressionV243:runRegressionSuiteV243, regressionV2431:runRegressionSuiteV2431}),
   V24_PRO: Object.freeze({version: META.version, edition: META.edition,
-    analyze: analyzePRO, validate: runFullSuiteV244,
+    analyze: analyzePRO, validate: runFullSuiteV23,
     benchmark: runArabicProBenchmarkV23,
     benchmarkAdditions: runV24AdditionBenchmarkV24,
     analyzeLong: analyzeLongV24,
