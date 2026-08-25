@@ -462,10 +462,10 @@
 const META = Object.freeze({
   name: 'Arabic Proofreader Hybrid Engine',
   nameArabic: 'محرك التدقيق العربي الهجين — النسخة الاحترافية الشاملة',
-  version: '24.2.0',
-  edition: 'PRO-FINAL-V24.2',
+  version: '24.2.1',
+  edition: 'PRO-FINAL-V24.2.1',
   language: 'ar',
-  release: 'V24.2 PRO FINAL — استكمال الاستدعاء الإملائي + واو الجماعة + العبارات الثابتة فوق V24.1',
+  release: 'V24.2.1 PRO FINAL — إصلاح إزالة التكرارات وحسم التعارضات الإملائية المراجعة فوق V24.2',
   stability: 'stable',
   releaseDate: '2026-08-22',
   governingPrinciple: 'عدم إفساد الجملة الصحيحة أهم من اكتشاف خطأ إضافي — توليدُ الاقتراح لا يعني قبولَه.',
@@ -589,7 +589,9 @@ const META = Object.freeze({
     'preposition-pronoun-guard-1.0',
     'v23-decision-governance-1.0',
     'v24.1-decision-safety-1.0',
-    'v24.1-context-orthography-1.0'
+    'v24.1-context-orthography-1.0',
+    'v24.2.1-deterministic-dedup-1.0',
+    'v24.2.1-reviewed-conflict-priority-1.0'
   ]),
   resolverVersions: Object.freeze({
     ClauseIsolationResolver: '1.2',
@@ -654,7 +656,9 @@ const META = Object.freeze({
     ArabicProBenchmark3000: '1.0',
     V23DecisionGovernance: '1.0',
     V241DecisionSafety: '1.0',
-    V241ContextOrthography: '1.0'
+    V241ContextOrthography: '1.0',
+    V2421DeterministicDedup: '1.0',
+    V2421ReviewedConflictPriority: '1.0'
   }),
   releaseCriteria: Object.freeze({
     precision: 0.99,
@@ -3673,7 +3677,7 @@ function findingFromTextSpan(context, {
 function deduplicateFindings(findings) {
   const selected = new Map();
   for (const item of findings) {
-    const key = [item.index, item.length, item.ruleId, item.replacement].join('|');
+    const key = [item.index, item.length, item.replacement].join('|');
     const previous = selected.get(key);
     if (!previous || previous.confidence < item.confidence) selected.set(key, item);
   }
@@ -14288,11 +14292,26 @@ function validateAndRerankFindings(context, findings) {
       }
       continue;
     }
-    list.sort((a, b) => b.confidence - a.confidence);
+    // V24.2.1: عند تعارض بديلين على النطاق نفسه، يكون المدخل الإملائي
+    // المراجع المطابق للسطح أعلى أولوية من القاعدة الإنتاجية/السياقية؛
+    // لا يجوز أن تمنع قراءةٌ منافسةٌ غير مراجعة تصحيحًا معجميًا قطعيًا.
+    list.sort((a, b) => {
+      const aReviewed = Boolean(a.reviewed && a.metadata?.source === 'V242_ORTHOGRAPHY_CORE');
+      const bReviewed = Boolean(b.reviewed && b.metadata?.source === 'V242_ORTHOGRAPHY_CORE');
+      if (aReviewed !== bReviewed) return aReviewed ? -1 : 1;
+      return b.confidence - a.confidence;
+    });
     const winner = list[0];
-    winner.requiresReview = true;
-    winner.recommendedAction = 'manual-review';
-    winner.contextValidation.checks.push('conflicting-alternative-retained-as-review');
+    const winnerReviewed = Boolean(winner.reviewed && winner.metadata?.source === 'V242_ORTHOGRAPHY_CORE');
+    if (!winnerReviewed) {
+      winner.requiresReview = true;
+      winner.recommendedAction = 'manual-review';
+      winner.contextValidation.checks.push('conflicting-alternative-retained-as-review');
+    } else {
+      winner.requiresReview = false;
+      winner.recommendedAction = 'apply';
+      winner.contextValidation.checks.push('reviewed-exact-surface-wins-conflict');
+    }
     unambiguous.push(winner);
     for (const loser of list.slice(1)) {
       loser.contextValidation.valid = false;
@@ -14953,6 +14972,24 @@ function runRegressionSuiteV242(options = {}) {
       findings: language.map(f => ({original: f.original, replacement: f.replacement,
         ruleId: f.ruleId, confidence: f.confidence}))});
   }
+
+  // V24.2.1 — حواجز التكرار والتصحيح الآلي المراجع.
+  const duplicateProbe = analyze('يجب أن نراجع النص بدلا من تجاهله، ثم نعيده بدلا من إهماله.', options);
+  const duplicateKeys = new Set((duplicateProbe.findings || []).map(f => `${f.index}|${f.length}|${f.replacement}`));
+  const duplicateCount = (duplicateProbe.findings || []).length - duplicateKeys.size;
+  if (duplicateCount === 0) passed += 1;
+  else failures.push({id:'v2421-dedup-01', kind:'duplicate-findings', text:'يجب أن نراجع النص بدلا من تجاهله، ثم نعيده بدلا من إهماله.', duplicateCount});
+
+  const autoProbe = analyze('وهذا يؤثر سلبا، ويجب أن يقدم اقتراحا صحيحا.', options);
+  const autoMap = new Map((autoProbe.findings || []).map(f => [f.original, f]));
+  const autoOk = ['سلبا', 'اقتراحا', 'صحيحا'].every(w => autoMap.get(w)?.autoCorrectable === true);
+  if (autoOk && autoProbe.corrected.includes('سلبًا') && autoProbe.corrected.includes('اقتراحًا') && autoProbe.corrected.includes('صحيحًا')) passed += 1;
+  else failures.push({id:'v2421-auto-01', kind:'safe-auto-correction', text:'وهذا يؤثر سلبا، ويجب أن يقدم اقتراحا صحيحا.',
+    findings:(autoProbe.findings || []).map(f => ({original:f.original,replacement:f.replacement,autoCorrectable:f.autoCorrectable,requiresReview:f.requiresReview}))});
+
+  const phraseBlock = analyze('إنشاء مشروع جديد مهم.', options);
+  if (!(phraseBlock.findings || []).some(f => f.original === 'إنشاء مشروع')) passed += 1;
+  else failures.push({id:'v2421-phrase-guard-01', kind:'false-positive', text:'إنشاء مشروع جديد مهم.'});
   return {version: META.version, total: V242_GOLD_REGRESSIONS.length + V242_BLOCK_REGRESSIONS.length,
     passed, failures, valid: failures.length === 0};
 }
