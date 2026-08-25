@@ -478,12 +478,12 @@
 const META = Object.freeze({
   name: 'Arabic Proofreader Hybrid Engine',
   nameArabic: 'محرك التدقيق العربي الهجين — النسخة الاحترافية الشاملة',
-  version: '24.4.0',
-  edition: 'PRO-FINAL-V24.4-CONTEXT-INTELLIGENCE',
+  version: '24.4.1',
+  edition: 'PRO-FINAL-V24.4.1-SAFE-VETO',
   language: 'ar',
-  release: 'V24.4 FINAL — Production context intelligence + safe abstention',
+  release: 'V24.3.1 PRO FINAL — Root-cause context hardening + safe abstention',
   stability: 'stable',
-  releaseDate: '2026-08-25',
+  releaseDate: '2026-08-24',
   governingPrinciple: 'عدم إفساد الجملة الصحيحة أهم من اكتشاف خطأ إضافي — توليدُ الاقتراح لا يعني قبولَه.',
   compat: Object.freeze({
     baseVersion: '20.0.0',
@@ -6076,6 +6076,17 @@ function weakVerbAgreementRule(context) {
     // مضافٌ إليهِ «طلب» لا فاعلٌ). نمنعُ إنذارَ المطابقةِ الزائفَ.
     const subjectObservedCase = observedCase(subject);
     if (subjectObservedCase === 'genitive') continue;
+    // V24.4.1 — «علي» المجرَّدة قبل اسمٍ معرَّفٍ تُقرأ حرفَ جرٍّ (على):
+    // «جلستُ علي الكرسي» — فاعلها ضميرُ متكلمٍ مستتر، و«الكرسي» مجرور، ولا
+    // يوجد «عليٌّ» اسمُ رجلٍ فاعلاً متأخراً. يمنع «جلست ← جلس» الكاذب،
+    // ويُبقي كشف «وصلت الطلابُ» (لا «علي» هناك) سليماً.
+    if (order !== 'SVO') {
+      const v244SubjCore = stripDiacritics(subject.morph?.core || subject.clean || '');
+      const v244AfterSubj = tokens[subjectIndex + 1];
+      if (v244SubjCore === 'علي' && v244AfterSubj && v244AfterSubj.type === 'word'
+          && (v244AfterSubj.morph?.segments?.article
+              || /^ال/.test(stripDiacritics(v244AfterSubj.clean || '')))) continue;
+    }
     // V24 — المبتدأُ topicٌ خبرُهُ جملةٌ فعليةٌ فاعلُها مستترٌ متكلمٌ/مخاطبٌ
     // لا يطابقه الفعل: «الكتابُ قرأتُهُ» — «الكتابُ» مبتدأٌ (مفعولٌ به معنويًّا
     // يعودُ عليه ضميرُ «ه»)، وخبرُهُ جملةٌ «قرأتُهُ» فاعلُها «أنا». فحملُ
@@ -16234,6 +16245,31 @@ function v243HasLocalExplicitSubjectAfterVerb(context, verbIndex) {
   return false;
 }
 
+/* ── V24.4.1 — دوال مساعدة لرقعة الأمان (SAFE-VETO) ─────────────────── */
+
+// فعل متعدٍّ (بذور؛ استبدلها بمعجم التعدي الكامل إن وجد)
+function v244IsTransitiveLemma(lemma){
+  if (!lemma) return false;
+  const TRANSITIVE = new Set(['شاهد','رأى','أكل','شرب','قرأ','كتب','حمل','فهم','سأل','أحب','زار','درس','لعب','سمع','فتح','غسل','لبس','اشترى','صنع','أخذ','أعطى','أرسل','أجاب','شكر','ساعد','واجه','تناول','أدى','ترك','راجع','حفظ','أنجز','أنهى']);
+  return TRANSITIVE.has(lemma);
+}
+
+// مفعول ظاهر مباشرة بعد الفعل (قبل أي شبه جملة أو ترقيم)؟
+function v244HasOvertObjectAfter(context, verbIndex){
+  const verb = context.tokens[verbIndex];
+  if (!verb) return false;
+  for (let i = verbIndex + 1; i < context.tokens.length; i += 1){
+    const t = context.tokens[i];
+    if (!t || t.sentence !== verb.sentence) break;
+    if (t.type === 'punct') break;
+    if (t.type !== 'word') continue;
+    if (canonicalPrepositionCore(t)) break; // شبه جملة ⇒ لا مفعول مباشر
+    // unknown = كلمة معجمية خارج المعجم (التلفاز، الإنترنت…) — مفعول محتمل
+    return (t.morph?.candidates || []).some(c => c.pos === 'noun' || c.pos === 'unknown');
+  }
+  return false;
+}
+
 function v243ContextualSubjectContinuityRecall(context, findings) {
   const out = [...(findings || [])];
   const seen = new Set(out.map(f => `${f.index}|${f.length}|${f.replacement}`));
@@ -16242,6 +16278,16 @@ function v243ContextualSubjectContinuityRecall(context, findings) {
     const token = context.tokens[i];
     if (!token || token.type !== 'word' || !bestVerb(token)) continue;
     const ruleVerb = bestVerb(token);
+    // ▼ V24.4.1 VETO — قراءة ضمير المتكلم قائمة ⇒ امتناع تام ▼
+    // «ثم شاهدتُ التلفازَ»: ماضٍ منتهٍ بتاءٍ غير مشكولة + فعل متعدٍّ + مفعول
+    // ظاهر بعده ⇒ قراءة المتكلم (شاهدتُ) قائمةٌ لم تُنفَ، فلا تعارضَ مطابقةَ
+    // محسوماً. أما اللازم («وصلت الطلابُ») فالاسم بعده فاعلٌ والكشفُ باقٍ.
+    if (
+      /ت$/.test(stripDiacritics(token.surface || '')) &&
+      v244IsTransitiveLemma(ruleVerb.lemma) &&
+      v244HasOvertObjectAfter(context, token.index)
+    ) { continue; }
+    // ▲ نهاية الـ VETO ▲
     // الفاعل الظاهر المحلي أقوى من استمرارية الفاعل عبر العطف.
     // لا نسمح للمحلل السياقي بتغيير «بدأت الطالبات» أو «يستمعون»
     // اعتمادًا على فاعل الجملة السابقة.
@@ -17112,12 +17158,6 @@ function analyze(input, options = {}) {
   const v2433PostPhaseGate = applyV2433RoleDecision(context, effectiveFindings);
   effectiveFindings = v2433PostPhaseGate.kept;
   context.v2433PostPhaseVetoed = v2433PostPhaseGate.vetoed;
-
-  // V24.4: late candidates (including reviewed orthography) must pass the same
-  // imperative/protected-reading gate; this closes the ordering gap in V24.3.4.
-  const v244LateProtection = applyV231ProtectionLayerV231(context, effectiveFindings);
-  effectiveFindings = v244LateProtection.kept;
-  context.v244VetoedFindings = v244LateProtection.vetoed;
 
 
 
@@ -20045,10 +20085,7 @@ function v23VetoImperative(context, finding, tk) {
   const m = tk.token.morph;
   const vA = (m && m.verbAnalyses) || [];
   const cands = (m && m.candidates) || [];
-  const surface = stripDiacritics(String(finding.original || tk.token.clean || ''));
-  const lexicalImperative = ['اكتب','اقرأ','افهم'].includes(surface)
-    && (tk.index === 0 || /[:؛،.]$/u.test(String(context.text || '').slice(0, tk.token.start || 0)));
-  const hasImperative = lexicalImperative || vA.concat(cands).some(a => a.pos === 'verb'
+  const hasImperative = vA.concat(cands).some(a => a.pos === 'verb'
     && (a.tense === 'imperative' || a.mood === 'imperative'));
   if (!hasImperative) return null;
   // إن سبق الفعلَ فاعلٌ صريحٌ معرفٌ (كمحامية في «المحامية دافع عن المتهم») فليست
@@ -20181,7 +20218,7 @@ function v231VetoComparativeIdafa(context, finding, tk) {
  *   يُقلبُ إلى «أكتب» (متكلمٌ حاضرٌ بهمزةِ قطعٍ). حارسُ الرسمِ المعجميِّ
  *   (WORDS: اكتب→أكتب) يصدّرُ إنذارًا خاطئًا عندَ قراءةِ الأمرِ. */
 function v231VetoWaslImperative(context, finding, tk) {
-  if (!/(?:ORTHOGRAPHY_V18|V2434_REVIEWED_ORTHOGRAPHY):اكتب|(?:ORTHOGRAPHY_V18|V2434_REVIEWED_ORTHOGRAPHY):اقرا|(?:ORTHOGRAPHY_V18|V2434_REVIEWED_ORTHOGRAPHY):افهم/.test(finding.ruleId || '')) return null;
+  if (!/ORTHOGRAPHY_V18:اكتب|ORTHOGRAPHY_V18:اقرا|ORTHOGRAPHY_V18:افهم/.test(finding.ruleId || '')) return null;
   const m = tk.token.morph;
   const vA = (m && m.verbAnalyses) || [];
   const cands = (m && m.candidates) || [];
@@ -22502,18 +22539,6 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
 }
 
 
-  function runRegressionSuiteV244(options = {}) {
-    const suites = {v243: runRegressionSuiteV243(options), v2431: runRegressionSuiteV2431(options), api: runPROApiSanityChecks()};
-    const failures = Object.entries(suites).filter(([,r]) => r && r.valid === false).map(([name,r]) => ({suite:name, result:r}));
-    return {version:META.version, suite:'V24.4 FINAL', suites, passed: Object.keys(suites).length-failures.length, total:Object.keys(suites).length, failures, valid: failures.length===0};
-  }
-  function runFullSuiteV244(options = {}) {
-    const base = runFullSuiteV20(options);
-    const regression = runRegressionSuiteV244(options);
-    const over = runOverCorrectionBenchmarkV1910(options);
-    return {version:META.version, valid:Boolean(base.valid && regression.valid && over.valid), suites:{baseline:base, regressionV244:regression, overCorrection:over}};
-  }
-
   const ArabicProofreaderV18 = Object.freeze({
     META, CONFIG, DEFAULT_OPTIONS,
     analyze, check, correct, suggest, parse, inspectWord, inspectPOS, inspectSyntax, inspectGovernment,
@@ -22699,8 +22724,6 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
   V2432_ROLE_GRAPH: Object.freeze({version:V2432_ROLE_GRAPH_VERSION, build:v2432BuildRoleGraph, recall:v2432RoleBasedAgreementRecall}),
   V24_3_3_ROLE_GRAPH: Object.freeze({version:'1.0', build:v2433BuildRoleGraph, validate:applyV2433RoleDecision}),
   V24_3_4_CONTEXT_INTELLIGENCE: Object.freeze({version:'24.3.4'}),
-  runRegressionSuiteV244, runFullSuiteV244,
-  V24_4_PRO: Object.freeze({version:META.version, edition:META.edition, analyze, validate:runFullSuiteV244, regression:runRegressionSuiteV244}),
   v2433BuildRoleGraph, v2433SafeRoleRecall, v2433RelativeSubjectRecall, v2433LegacyStructuralVeto, applyV2433RoleDecision, v2433ValidateSubjectFinding,
   V24_3_PRO: Object.freeze({version:META.version, edition:META.edition, analyze:analyze, validate:runRegressionSuiteV2431, safety:inspectV243Safety, phase2:V243_PHASE2, regressionV243:runRegressionSuiteV243, regressionV2431:runRegressionSuiteV2431}),
   V24_PRO: Object.freeze({version: META.version, edition: META.edition,
