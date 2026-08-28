@@ -451,9 +451,6 @@
       root.ArabicProofreaderV24_6 = api;
       root.ArabicProofreaderV24_6PRO = api;
       root.V24_6 = api;
-      root.ArabicProofreaderV24_6_1 = api;
-      root.ArabicProofreaderV24_6_1PRO = api;
-      root.V24_6_1 = api;
       root.ArabicProofreaderV24_4_3 = api;
       root.ArabicProofreaderV24_4_3PRO = api;
       root.V24_4_3 = api;
@@ -472,7 +469,6 @@
       root.__ARABIC_PROOFREADER_V24_4_READY__ = true;
       root.__ARABIC_PROOFREADER_V24_5_READY__ = true;
       root.__ARABIC_PROOFREADER_V24_6_READY__ = true;
-      root.__ARABIC_PROOFREADER_V24_6_1_READY__ = true;
       root.__ARABIC_PROOFREADER_V24_4_3_READY__ = true;
     root.__ARABIC_PROOFREADER_VERSION__ = api.META.version;
       root.__ARABIC_PROOFREADER_V24_3_2_READY__ = true;
@@ -498,10 +494,10 @@
 const META = Object.freeze({
   name: 'Arabic Proofreader Hybrid Engine',
   nameArabic: 'محرك التدقيق العربي الهجين — النسخة الاحترافية الشاملة',
-  version: '24.6.1',
-  edition: 'PRODUCTION-V24.6.1-CORRECTNESS-HARDENED',
+  version: '24.6.0',
+  edition: 'PRODUCTION-V24.6.0-RECALL-SAFE',
   language: 'ar',
-  release: 'V24.6.1 PRODUCTION — Correctness Hardening / Recall Safe / Exact Benchmark',
+  release: 'V24.6.0 PRODUCTION — Recall Expansion / Context-Aware / Safe',
   stability: 'stable',
   releaseDate: '2026-08-28',
   governingPrinciple: 'عدم إفساد الجملة الصحيحة أهم من اكتشاف خطأ إضافي — توليدُ الاقتراح لا يعني قبولَه.',
@@ -18174,283 +18170,8 @@ function runRegressionSuiteV246(options={}){
 }
 function runFullSuiteV246(options={}){
   const r=runRegressionSuiteV246(options), h=runV246HoldoutBenchmark(options);
-  const hard=runRegressionSuiteV2461(options);
-  return {
-    version:META.version,
-    valid:r.valid && h.valid && hard.valid,
-    suites:{
-      regressionV246:{valid:r.valid,total:r.total,passed:r.passed,failed:r.failed,failures:r.failures.slice(0,50)},
-      proposalHoldoutV246:{valid:h.valid,recall:h.recall,precision:h.precision,f1:h.f1,falsePositiveRate:h.falsePositiveRate,wrongCorrectionRate:h.wrongCorrectionRate,abstentionRate:h.abstentionRate,counts:h.counts},
-      correctnessV2461:{valid:hard.valid,total:hard.total,passed:hard.passed,failed:hard.failed,failures:hard.failures.slice(0,20),exactHoldout:hard.exactHoldout},
-      legacyRegressionV1910:hard.failures.find(x=>x.suite==='V1910')?false:true,
-      legacyRegressionV23:hard.failures.find(x=>x.suite==='V23')?false:true,
-      legacyRegressionV2431:hard.failures.find(x=>x.suite==='V2431')?false:true,
-      legacyRegressionV245:hard.failures.find(x=>x.suite==='V245')?false:true
-    }
-  };
-}
-
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * V24.6.1 — CORRECTNESS HARDENING
- * Root-cause fixes for V24.6 findings:
- *  1) never apply five-verb morphology to a non-verb token;
- *  2) never override non-human plural agreement (effective feminine singular);
- *  3) never inherit an SVO subject across a stronger local nominal subject;
- *  4) never let a generic ditransitive rule turn the true subject of «سأل» into an object;
- *  5) never force an ambiguous ـين form to dual/plural without independent number evidence;
- *  6) keep behavioral benchmarks exact: proposal != correction.
- * No low-level rule is allowed to overrule these structural invariants.
- * ═══════════════════════════════════════════════════════════════════════════ */
-const V2461_LAYER_VERSION = '1.0';
-
-function v2461IsFiveVerbToken(token){
-  if(!token) return false;
-  const vb=bestVerb(token);
-  const pcs=new Set(['2fs','2mp','2d','3mp','3md','3fd']);
-  if(vb && pcs.has(String(vb.personCode||''))
-      && /^(?:present|indicative|subjunctive|jussive)?$/u.test(String(vb.tense||'present'))) return true;
-  return Array.isArray(token?.morph?.candidates) && token.morph.candidates.some(c=>
-    c?.pos==='verb' && pcs.has(String(c.personCode||'')) && Number(c.confidence||0)>=0.90);
-}
-function v2461IsVerbToken(token){
-  if(!token) return false;
-  if(bestVerb(token)) return true;
-  const pos=String(token?.morph?.pos||token?.morph?.resolvedPos||'');
-  if(pos==='verb') return true;
-  return Array.isArray(token?.morph?.candidates)
-    && token.morph.candidates.some(c=>c?.pos==='verb' && Number(c.confidence||0)>=0.90);
-}
-function v2461TokenCandidates(token){ return Array.isArray(token?.morph?.candidates)?token.morph.candidates:[]; }
-function v2461HasNominalNumber(token,n){
-  return v2461TokenCandidates(token).some(c=>c?.pos==='noun' && c?.number===n && Number(c.confidence||0)>=0.95);
-}
-function v2461HasBothDualPlural(token){
-  return v2461HasNominalNumber(token,'du') && v2461HasNominalNumber(token,'pl');
-}
-function v2461EffectiveFeatures(token){
-  try { return effectiveAgreement(tokenFeatures(token)); } catch(_){ return tokenFeatures(token); }
-}
-function v2461IsStrongNominal(token){
-  if(!token) return false;
-  if(token.morph?.segments?.conjunction && token.morph?.segments?.article && token.morph?.nominal) return true;
-  return isStrongNominalCandidate(token);
-}
-function v2461LocalSubjectBetween(context, subjectIndex, verbIndex){
-  const toks=context.tokens||[];
-  for(let i=subjectIndex+1;i<verbIndex;i++){
-    const t=toks[i];
-    if(!t) continue;
-    const core=v246Core(t);
-    if(['و','ف','ثم','بل','لكن','أو','أم'].includes(core)) continue;
-    if(v2461IsStrongNominal(t)) return {index:i,token:t,reason:'strong-local-nominal-between-subject-and-verb'};
-  }
-  return null;
-}
-const V2461_SAFE_REVIEWED_ORTHOGRAPHY = Object.freeze({
-  'مسئلة':'مسألة', 'مسوولية':'مسؤولية', 'مسئولية':'مسؤولية', 'بيئه':'بيئة',
-  'مبداء':'مبدأ', 'مبدا':'مبدأ', 'لاكن':'لكن', 'هاذا':'هذا', 'هاذه':'هذه',
-  'إنشالله':'إن شاء الله', 'انشالله':'إن شاء الله', 'إنشاءالله':'إن شاء الله'
-});
-function v2461ReviewedOrthographyRecovery(context, findings){
-  const out=[...(findings||[])];
-  const seen=new Set(out.map(f=>`${f.index}|${f.length}|${f.replacement}`));
-  for(const tok of (context.tokens||[])){
-    const s=String(tok.surface||tok.clean||''); const repl=V2461_SAFE_REVIEWED_ORTHOGRAPHY[s];
-    if(!repl || repl===s) continue;
-    const f=findingFromSpan(context,{startToken:tok,replacement:repl,ruleId:'V2461_REVIEWED_ORTHOGRAPHY',type:'إملائي',classification:'orthographic',confidence:0.9995,explanation:'تصحيح إملائي مراجع ذو بديل واحد؛ رُقّي في V24.6.1 بعد اجتياز حارس القرار السياقي.',evidence:['reviewed-lexicon','single-target','V2461-correctness-hardened'],safe:true,metadata:{v2461:true,reviewed:true,safeDeterministic:true}});
-    const k=`${f.index}|${f.length}|${f.replacement}`; if(!seen.has(k)){seen.add(k);out.push(f);}
-  }
-  return out;
-}
-
-function v2461FindingSuppression(context,f){
-  const id=String(f?.ruleId||'');
-  const tok=tokenAtOriginalSpan(context,f);
-  // V246 five-verb recalls are valid only when the target is morphologically a verb.
-  if(id==='V246_EXPLICIT_JUSSIVE_MOOD' || id==='V246_EXPLICIT_SUBJUNCTIVE_MOOD'
-      || id==='V246_EXPLICIT_JUSSIVE_FIVE_VERB' || id==='V246_EXPLICIT_SUBJUNCTIVE_FIVE_VERB'){
-    if(!v2461IsVerbToken(tok)) return 'governed-target-is-not-a-verb';
-    if(/FIVE_VERB/u.test(id) && !v2461IsFiveVerbToken(tok)) return 'governed-target-is-not-a-five-verb';
-  }
-  // V246 object-case recall must not rewrite ordinary singular nouns ending in ـان.
-  if(id==='V246_EXPLICIT_OBJECT_CASE'){
-    if(!tok || !v2461HasNominalNumber(tok,'du') && !v2461HasNominalNumber(tok,'pl')) return 'object-case-target-not-dual-or-sound-plural';
-  }
-  if(id==='V246_PASSIVE_NAIB_FAEL'){
-    if(!tok || !v2461HasNominalNumber(tok,'pl')) return 'passive-naib-fael-not-sound-masculine-plural';
-  }
-  // In a valid SVO clause a later strong nominal is a competing/local subject.
-  if((id==='V2433_ROLE_SVO_AGREEMENT' || id==='V2433_ROLE_SVO_SUBJECT_CASE')
-      && Number.isInteger(f.metadata?.subjectIndex) && Number.isInteger(f.metadata?.verbIndex)){
-    const local=v2461LocalSubjectBetween(context,f.metadata.subjectIndex,f.metadata.verbIndex);
-    if(local) return 'local-subject-overrides-inherited-svo-subject';
-    const subj=context.tokens[f.metadata.subjectIndex];
-    const raw=tokenFeatures(subj);
-    const eff=v2461EffectiveFeatures(subj);
-    // Non-human plural agreement is feminine singular for agreement purposes.
-    if(raw?.number==='pl' && V1910_NONHUMAN_ANIMACIES.has(raw?.animacy)){
-      if(eff.number==='sg' && eff.gender==='f' && /(?:وا|ون|وا)$/u.test(stripDiacritics(String(f.replacement||'')))) return 'nonhuman-plural-prefers-feminine-singular-agreement';
-    }
-  }
-  // «سأل الطالبُ الكتابَ» is not a license to make الطالبُ an object.
-  if(id==='V2443_REVIEWED_ORTHOGRAPHY_RECALL' && stripDiacritics(String(f.original||''))==='ان') {
-    const before=String(context.original||'').slice(0,Number(f.index||0));
-    const lastBoundary=Math.max(before.lastIndexOf('.'),before.lastIndexOf('؟'),before.lastIndexOf('!'),before.lastIndexOf('؛'),before.lastIndexOf('\n'));
-    const sentencePrefix=before.slice(lastBoundary+1);
-    if(/^\s*$/.test(sentencePrefix)) return 'sentence-initial-in-anna-ambiguity';
-  }
-  if(id==='V245_DITRANSITIVE_OBJECT1_CASE'){
-    const vi=Number.isInteger(f.metadata?.verbIndex)?f.metadata.verbIndex:null;
-    const si=Number.isInteger(f.metadata?.subjectIndex)?f.metadata.subjectIndex:null;
-    if(vi!=null){
-      const prev=context.tokens[vi-1];
-      if(v246Core(prev)==='سأل' || v246Core(prev)==='يسأل' || v246Core(prev)==='سألت') return 'question-verb-subject-object-frame-protection';
-    }
-    const targetIndex=tok?.index;
-    if(Number.isInteger(targetIndex)){
-      const prev=context.tokens[targetIndex-1];
-      if(v246Core(prev)==='سأل' || v246Core(prev)==='يسأل' || v246Core(prev)==='سألت') return 'question-verb-subject-object-frame-protection';
-    }
-    if(si!=null && context.syntax?.roles?.[si]?.role==='subject') return 'resolved-subject-must-not-become-object';
-  }
-  // ـين is structurally ambiguous between dual and sound-masculine plural.
-  // Do not invent a number where neither a number cue nor a disambiguating dependent exists.
-  if(/(?:SUBJECT_CASE_V1876|TOPIC_CASE_V1876)/u.test(id) && /ين$/u.test(stripDiacritics(String(f.original||'')))){
-    if(tok && v2461HasBothDualPlural(tok)){
-      const i=tok.index;
-      const next=context.tokens[i+1];
-      const prev=context.tokens[i-1];
-      const n=next ? stripDiacritics(String(next.surface||next.clean||'')) : '';
-      const p=prev ? v246Core(prev) : '';
-      const numberCue=/^(?:اثنان|اثنين|اثنتان|اثنتين|ثلاثة|أربعة|خمسة|ستة|سبعة|ثمانية|تسعة|عشرة|كل|جميع)$/u.test(n);
-      const dualDependent=/(?:ان|ين)$/u.test(n) && (v2461HasNominalNumber(next,'du') || /(?:ان|ين)$/u.test(n));
-      if(!numberCue && !dualDependent && !['إن','أن','لكن','بل','ليت','لعل','كأن'].includes(p)) return 'ambiguous-dual-plural-no-number-evidence';
-    }
-  }
-  return null;
-}
-function v2461StructuralSvoCaseRecall(context, findings){
-  const out=[...(findings||[])];
-  const seen=new Set(out.map(f=>`${f.index}|${f.length}|${f.replacement}`));
-  const toks=context.tokens||[];
-  const addText=(start,len,repl,vi,si,evidence)=>{
-    const f=findingFromTextSpan(context,{normalizedStart:start,normalizedEnd:start+len,replacement:repl,ruleId:'V2461_SVO_EXPLICIT_NUMBER_CASE',type:'نحوي',classification:'syntactic-case',confidence:0.998,explanation:'فاعل متقدم في SVO، وحالة العدد حُسمت مستقلًا من تصريف الفعل اللاحق؛ «وا» للجمع و«ان/تان» للمثنى.',evidence,safe:false,metadata:{v2461:true,subjectIndex:si,verbIndex:vi,relationConfidence:0.998,order:'SVO',reviewed:true,multiCandidate:true}});
-    const k=`${f.index}|${f.length}|${f.replacement}`;
-    const priorIndex=out.findIndex(x=>`${x.index}|${x.length}|${x.replacement}`===k);
-    if(priorIndex>=0){
-      const prior=out[priorIndex];
-      const replaceLegacy=/^(?:SUBJECT_CASE_V1876|TOPIC_CASE_V1876)$/u.test(String(prior.ruleId||''));
-      if(replaceLegacy){ out[priorIndex]=f; return; }
-    }
-    if(!seen.has(k)){seen.add(k);out.push(f);}
-  };
-  const re=/(^|[^ء-ي])((?:ال)?[ء-ي]{3,}ين)\s+([^\s،؛.!؟]+)(?![ء-ي])/gu; let m;
-  while((m=re.exec(String(context.original||'')))){
-    const start=m.index+m[1].length, token=context.tokens.find(t=>t.originalStart===start || (t.originalStart<=start && t.originalEnd>=start+m[2].length));
-    if(!token || String(token.morph?.pos||'')!=='noun') continue;
-    const raw=token.morph?.numberCandidates||token.morph?.nominal?.numberCandidates||[];
-    if(!raw.includes('du')&&!raw.includes('pl')) continue;
-    const vt=context.tokens.find(t=>t.originalStart===start+m[2].length) || context.tokens[token.index+1];
-    const vCand=vt?.morph?.verbAnalyses?.[0] || vt?.morph?.candidates?.find(c=>c?.pos==='verb'&&Number(c.confidence||0)>=0.90);
-    if(!vt || !vCand || String(vt.morph?.pos||'')!=='verb') continue;
-    const pc=String(vCand.personCode||'');
-    if(pc==='3mp'&&raw.includes('pl')) addText(start,m[2].length,m[2].replace(/ين$/u,'ون'),vt.index,token.index,['V2461-text-SVO','verb-3mp','plural-disambiguation']);
-    else if(pc==='3md'&&raw.includes('du')&&tokenFeatures(token).gender==='m') addText(start,m[2].length,m[2].replace(/ين$/u,'ان'),vt.index,token.index,['V2461-text-SVO','verb-3md','dual-disambiguation']);
-    else if(pc==='3fd'&&raw.includes('du')&&tokenFeatures(token).gender==='f') addText(start,m[2].length,m[2].replace(/ين$/u,'تان'),vt.index,token.index,['V2461-text-SVO','verb-3fd','dual-feminine-disambiguation']);
-  }
-  return out;
-}
-
-function applyV2461CorrectnessGate(context, findings){
-  const kept=[], vetoed=[];
-  for(const f of findings||[]){
-    const safeOrth=Object.prototype.hasOwnProperty.call(V2461_SAFE_REVIEWED_ORTHOGRAPHY,String(f.original||''))
-      && String(f.replacement||'')===V2461_SAFE_REVIEWED_ORTHOGRAPHY[String(f.original||'')];
-    if(safeOrth){
-      f.metadata={...(f.metadata||{}),v2461:true,safeDeterministic:true,reviewed:true};
-      f.safeCandidate=true; f.requiresReview=false; f.confidence=Math.max(Number(f.confidence||0),0.9995);
-      f.suggestionKind='spelling'; f.suggestionGroup='أخطاء لغوية'; f.recommendedAction='auto-correct';
-      f.v2461Promoted=true;
-    }
-    const reason=v2461FindingSuppression(context,f);
-    if(reason){
-      f.v2461Vetoed=true; f.v2461VetoReason=reason; f.manualOnly=true;
-      vetoed.push({finding:f,reason});
-    } else kept.push(f);
-  }
-  context.v2461VetoedFindings=vetoed;
-  return {kept,vetoed};
-}
-
-/* Exact behavioral benchmark for V24.6.1.
- * This benchmark tests the actual corrected text, not the presence of a proposal.
- */
-const V2461_EXACT_HOLDOUT_ERRORS = Object.freeze([
-  {id:'e01',text:'وصل المعلمين الثلاثة إلى المدرسة.',replacement:'المعلمون',mode:'proposal'},
-  {id:'e02',text:'رأيت المعلمون في الفصل.',replacement:'المعلمين',mode:'proposal'},
-  {id:'e03',text:'كُرِّمَ المعلمين الثلاثة.',replacement:'المعلمون',mode:'proposal'},
-  {id:'e04',text:'لم يذهبُ الطالب.',replacement:'يذهبْ',mode:'proposal'},
-  {id:'e05',text:'لن يكتبُ الطالب.',replacement:'يكتبَ',mode:'proposal'},
-  {id:'e06',text:'أن يدرسُ الطالب.',replacement:'يدرسَ',mode:'proposal'},
-  {id:'e07',text:'مسئلة مهمة.',replacement:'مسألة',mode:'auto'},
-  {id:'e08',text:'هذه مسئولية كبيرة.',replacement:'مسؤولية',mode:'auto'},
-  {id:'e09',text:'قرأت عن البيئه.',replacement:'البيئة',mode:'auto'},
-  {id:'e10',text:'لاكن الطالب حضر.',replacement:'لكن',mode:'auto'},
-  {id:'e11',text:'هاذا قرار مهم.',replacement:'هذا',mode:'auto'},
-  {id:'e12',text:'هاذه مشكلة كبيرة.',replacement:'هذه',mode:'auto'},
-  {id:'e13',text:'مبداء النجاح واضح.',replacement:'مبدأ',mode:'auto'},
-  {id:'e14',text:'إنشالله سأحضر غدًا.',replacement:'إن شاء الله',mode:'auto'},
-  {id:'e15',text:'متى تبدأ المسابقة.',replacement:'؟',mode:'auto'}
-]);
-const V2461_EXACT_HOLDOUT_CONTROLS = Object.freeze([
-  'أن أكون شخصًا أفضل.',
-  'علمت أن الامتحان قريب.',
-  'ان الامتحان قريب.',
-  'العلوم الحديثة مفيدة، والكتب الجديدة وصلت.',
-  'سأل الطالبُ الكتابَ.',
-  'اجتمع الباحثين.',
-  'وصل المعلمين.',
-  'كُرِّمَ المعلمين.',
-  'رأيت الامتحان.',
-  'إن الطالبَ مجتهدٌ.',
-  'مررت بالطالبين.',
-  'مررت بأحمدَ.'
-]);
-function runV2461ExactHoldout(options={}){
-  let proposalExact=0, autoExact=0, wrong=0;
-  const errors=[];
-  for(const item of V2461_EXACT_HOLDOUT_ERRORS){
-    const r=analyze(item.text,{safeMode:true,...options});
-    const exactProposal=(r.findings||[]).some(f=>String(f.replacement||'')===item.replacement);
-    const exactAuto=String(r.corrected||'').includes(item.replacement);
-    const ok=item.mode==='auto' ? exactAuto : exactProposal;
-    if(ok){ if(item.mode==='auto') autoExact++; else proposalExact++; }
-    else errors.push({id:item.id,kind:item.mode==='auto'?'auto-correction-miss':'proposal-miss',text:item.text,expected:item.replacement,mode:item.mode,corrected:r.corrected,findings:(r.findings||[]).map(f=>({ruleId:f.ruleId,original:f.original,replacement:f.replacement,confidence:f.confidence,autoCorrectable:f.autoCorrectable}))});
-    if(item.mode==='auto' && String(r.corrected||'')!==item.text && !exactAuto) wrong++;
-  }
-  const controls=[]; let fp=0;
-  for(const text of V2461_EXACT_HOLDOUT_CONTROLS){
-    const r=analyze(text,{safeMode:true,...options});
-    const harmful=(r.findings||[]).filter(f=>f.suggestionGroup!=='تحسين التنسيق والأسلوب'&&f.type!=='ترقيم');
-    if(harmful.length){fp++;controls.push({text,findings:harmful.map(f=>({ruleId:f.ruleId,original:f.original,replacement:f.replacement,confidence:f.confidence,veto:f.v2461VetoReason||null}))});}
-  }
-  const proposalTotal=V2461_EXACT_HOLDOUT_ERRORS.filter(x=>x.mode==='proposal').length;
-  const autoTotal=V2461_EXACT_HOLDOUT_ERRORS.filter(x=>x.mode==='auto').length;
-  const proposalRecall=proposalTotal?proposalExact/proposalTotal:1;
-  const autoRecall=autoTotal?autoExact/autoTotal:1;
-  const f1Proposal=proposalRecall;
-  const fpr=V2461_EXACT_HOLDOUT_CONTROLS.length?fp/V2461_EXACT_HOLDOUT_CONTROLS.length:0;
-  return {version:'24.6.1-exact-holdout',proposalTotal,proposalExact,proposalRecall,autoTotal,autoExact,autoCorrectionRate:autoRecall,falsePositives:fp,falsePositiveRate:fpr,wrongCorrections:wrong,f1Proposal,valid:proposalRecall===1&&autoRecall===1&&fpr===0&&wrong===0,errors,controlsFailed:controls};
-}
-function runRegressionSuiteV2461(options={}){
-  const failures=[]; let passed=0;
-  const exact=runV2461ExactHoldout(options);
-  if(exact.valid) passed++; else failures.push({kind:'exact-holdout',detail:exact});
-  for(const [suite,fn] of [['V1910',runRegressionSuiteV1910],['V23',runRegressionSuiteV23],['V2431',runRegressionSuiteV2431],['V245',runRegressionSuiteV245]]){
-    const r=fn(options); if(r.valid) passed++; else failures.push({kind:'legacy-regression',suite,failures:(r.failures||[]).slice(0,20)});
-  }
-  return {version:META.version,total:5,passed,failed:failures.length,valid:failures.length===0,failures,exactHoldout:exact};
+  const base=typeof runRegressionSuiteV245==='function'?runRegressionSuiteV245(options):null;
+  return {version:META.version,valid:r.valid&&h.valid&&(!base||base.valid),suites:{regressionV246:{valid:r.valid,total:r.total,passed:r.passed,failed:r.failed,failures:r.failures.slice(0,50)},holdoutV246:{valid:h.valid,recall:h.recall,precision:h.precision,f1:h.f1,falsePositiveRate:h.falsePositiveRate,wrongCorrectionRate:h.wrongCorrectionRate,abstentionRate:h.abstentionRate,counts:h.counts},regressionV245Base:base?{valid:base.valid,total:base.total,passed:base.passed}:null}};
 }
 
 function analyze(input, options = {}) {
@@ -18850,15 +18571,6 @@ function v2443FinalWrongCorrectionVeto(context, findings){
     context.v246RecallAdded = effectiveFindings.length;
   }
 
-  // V24.6.1 — correctness hardening: first recover number/case only when the
-  // finite verb independently disambiguates dual vs sound-masculine plural.
-  effectiveFindings = v2461StructuralSvoCaseRecall(context, effectiveFindings);
-  // Recover only independently reviewed orthography, then require every candidate
-  // to pass structural invariants.
-  effectiveFindings = v2461ReviewedOrthographyRecovery(context, effectiveFindings);
-  const v2461 = applyV2461CorrectnessGate(context, effectiveFindings);
-  effectiveFindings = v2461.kept;
-
   const ranked = rankAndClassify(effectiveFindings, context.options, context);
   ranked.suppressed.push(...v243Phase2.suppressed.map(x => x.finding));
 
@@ -18875,11 +18587,7 @@ function v2443FinalWrongCorrectionVeto(context, findings){
       finding.legacyAutoCorrectable = finding.autoCorrectable;
       const promotedGrammar = isSafeGrammarPromotionV2423(finding);
       const promotedGrammarV243 = isSafeGrammarPromotionV243(finding) && finding.v243Phase2AutoApproved === true;
-      const promotedReviewedV2461 = finding.metadata?.safeDeterministic === true
-        && finding.metadata?.v2461 === true && String(finding.classification||'').startsWith('orthographic')
-        && Number(finding.confidence||0) >= 0.999;
-      finding.autoCorrectable = promotedGrammarV243 || promotedGrammar || promotedReviewedV2461
-        || (Boolean(finding.autoCorrectable) && isSafeAutoCorrectionV1910(finding));
+      finding.autoCorrectable = promotedGrammarV243 || promotedGrammar || (Boolean(finding.autoCorrectable) && isSafeAutoCorrectionV1910(finding));
       if (promotedGrammarV243) {
         finding.requiresReview = false;
         finding.recommendedAction = 'auto-correct';
@@ -18955,8 +18663,7 @@ function v2443FinalWrongCorrectionVeto(context, findings){
 
   // V23.1.0 — سجل طبقة الحماية النحوية: قراءةٌ فقط، لا يغير أي مخرجات موجودة.
   result.v231Blocked = (context.v231VetoedFindings || []).length;
-  result.v246 = {version: '24.6.1', vetoed: (context.v246VetoedFindings || []).length, recallAdded: context.v246RecallAdded || 0, conflicts: (context.v246Conflicts || []).map(v => ({ruleId:v.finding?.ruleId, original:v.finding?.original, replacement:v.finding?.replacement, reason:v.reason}))};
-  result.v2461 = {version: V2461_LAYER_VERSION, vetoed: (context.v2461VetoedFindings || []).length, reasons: (context.v2461VetoedFindings || []).map(v => ({ruleId:v.finding?.ruleId, original:v.finding?.original, replacement:v.finding?.replacement, reason:v.reason}))};
+  result.v246 = {version: '24.6.0', vetoed: (context.v246VetoedFindings || []).length, recallAdded: context.v246RecallAdded || 0, conflicts: (context.v246Conflicts || []).map(v => ({ruleId:v.finding?.ruleId, original:v.finding?.original, replacement:v.finding?.replacement, reason:v.reason}))};
   result.v231Guard = {
     vetoes: (context.v231VetoedFindings || []).map(v => ({
       ruleId: v.finding.ruleId, original: v.finding.original,
@@ -24371,10 +24078,7 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
   V246_LAYER_VERSION, V246_REVIEWED_ORTHOGRAPHY, V246_REVIEWED_PHRASES, V246_HOLDOUT_ERRORS, V246_HOLDOUT_CONTROLS,
   V246_REGRESSION_ERRORS, V246_REGRESSION_BLOCKS, runV246RecallLayer, applyV246DecisionGate,
   runV246HoldoutBenchmark, runRegressionSuiteV246, runFullSuiteV246,
-  V2461_LAYER_VERSION, V2461_EXACT_HOLDOUT_ERRORS, V2461_EXACT_HOLDOUT_CONTROLS,
-  v2461StructuralSvoCaseRecall, applyV2461CorrectnessGate, runV2461ExactHoldout, runRegressionSuiteV2461,
-  V24_6_PRO: Object.freeze({version:META.version, edition:META.edition, analyze, correct, suggest, validate:runFullSuiteV246, holdout:runV246HoldoutBenchmark, exactHoldout:runV2461ExactHoldout, regression:runRegressionSuiteV2461, recallLayer:runV246RecallLayer, recallSafety:true, correctnessHardened:true}),
-  V24_6_1_PRO: Object.freeze({version:META.version, edition:META.edition, analyze, correct, suggest, validate:runFullSuiteV246, holdout:runV2461ExactHoldout, regression:runRegressionSuiteV2461, recallLayer:runV246RecallLayer, correctnessGate:applyV2461CorrectnessGate, correctnessHardened:true}),
+  V24_6_PRO: Object.freeze({version:META.version, edition:META.edition, analyze, correct, suggest, validate:runFullSuiteV246, holdout:runV246HoldoutBenchmark, regression:runRegressionSuiteV246, recallLayer:runV246RecallLayer, recallSafety:true}),
   V24_PRO: Object.freeze({version: META.version, edition: META.edition,
     analyze: analyzePRO, validate: runFullSuiteV23,
     benchmark: runArabicProBenchmarkV23,
@@ -24389,5 +24093,850 @@ function runV24AdditionBenchmarkV24(engine, options = {}) {
     benchmark: runArabicProBenchmarkV1910Combined,
     diacritize: diacritizeV20})
   });
-  return ArabicProofreaderV18;
+  
+
+  var __I = {};
+  try { __I['ADJECTIVE_FORM_INDEX'] = ADJECTIVE_FORM_INDEX; } catch(e) { __I['ADJECTIVE_FORM_INDEX'] = null; }
+  try { __I['ADJECTIVE_LEMMAS'] = ADJECTIVE_LEMMAS; } catch(e) { __I['ADJECTIVE_LEMMAS'] = null; }
+  try { __I['ADVERBIAL_GOVERNORS'] = ADVERBIAL_GOVERNORS; } catch(e) { __I['ADVERBIAL_GOVERNORS'] = null; }
+  try { __I['AFAAL_PATTERN_V20'] = AFAAL_PATTERN_V20; } catch(e) { __I['AFAAL_PATTERN_V20'] = null; }
+  try { __I['ALIF_MAQSURA_INVARIANTS_V1880'] = ALIF_MAQSURA_INVARIANTS_V1880; } catch(e) { __I['ALIF_MAQSURA_INVARIANTS_V1880'] = null; }
+  try { __I['APPROXIMATION_VERBS_V20'] = APPROXIMATION_VERBS_V20; } catch(e) { __I['APPROXIMATION_VERBS_V20'] = null; }
+  try { __I['ARABIC_DIACRITICS_RE'] = ARABIC_DIACRITICS_RE; } catch(e) { __I['ARABIC_DIACRITICS_RE'] = null; }
+  try { __I['ARABIC_LETTER_RE'] = ARABIC_LETTER_RE; } catch(e) { __I['ARABIC_LETTER_RE'] = null; }
+  try { __I['ARABIC_PRO_BENCHMARK_V1900'] = ARABIC_PRO_BENCHMARK_V1900; } catch(e) { __I['ARABIC_PRO_BENCHMARK_V1900'] = null; }
+  try { __I['ARABIC_PRO_BENCHMARK_V23'] = ARABIC_PRO_BENCHMARK_V23; } catch(e) { __I['ARABIC_PRO_BENCHMARK_V23'] = null; }
+  try { __I['ARABIZED_TERMS_V1880'] = ARABIZED_TERMS_V1880; } catch(e) { __I['ARABIZED_TERMS_V1880'] = null; }
+  try { __I['AUTOMATIC'] = AUTOMATIC; } catch(e) { __I['AUTOMATIC'] = null; }
+  try { __I['BASE_GOLD_CORPUS'] = BASE_GOLD_CORPUS; } catch(e) { __I['BASE_GOLD_CORPUS'] = null; }
+  try { __I['BASE_NO_FALSE_POSITIVE_CORPUS'] = BASE_NO_FALSE_POSITIVE_CORPUS; } catch(e) { __I['BASE_NO_FALSE_POSITIVE_CORPUS'] = null; }
+  try { __I['CASE_MARKS_RE'] = CASE_MARKS_RE; } catch(e) { __I['CASE_MARKS_RE'] = null; }
+  try { __I['CLOSED_CLASS_CORRECTIONS_V1879'] = CLOSED_CLASS_CORRECTIONS_V1879; } catch(e) { __I['CLOSED_CLASS_CORRECTIONS_V1879'] = null; }
+  try { __I['COMMON_ERRORS_V1880'] = COMMON_ERRORS_V1880; } catch(e) { __I['COMMON_ERRORS_V1880'] = null; }
+  try { __I['COMPARATIVE_CUES'] = COMPARATIVE_CUES; } catch(e) { __I['COMPARATIVE_CUES'] = null; }
+  try { __I['COMPARATIVE_EXCEPTIONS_V20'] = COMPARATIVE_EXCEPTIONS_V20; } catch(e) { __I['COMPARATIVE_EXCEPTIONS_V20'] = null; }
+  try { __I['COMPARATIVE_LEMMAS_V20'] = COMPARATIVE_LEMMAS_V20; } catch(e) { __I['COMPARATIVE_LEMMAS_V20'] = null; }
+  try { __I['COMPETING_ANALYSIS_CONFIDENCE_V1873'] = COMPETING_ANALYSIS_CONFIDENCE_V1873; } catch(e) { __I['COMPETING_ANALYSIS_CONFIDENCE_V1873'] = null; }
+  try { __I['CONDITIONAL_MARKERS'] = CONDITIONAL_MARKERS; } catch(e) { __I['CONDITIONAL_MARKERS'] = null; }
+  try { __I['CONDITIONAL_PARTICLES_V1880'] = CONDITIONAL_PARTICLES_V1880; } catch(e) { __I['CONDITIONAL_PARTICLES_V1880'] = null; }
+  try { __I['CONFIDENCE_SCALE_V1880'] = CONFIDENCE_SCALE_V1880; } catch(e) { __I['CONFIDENCE_SCALE_V1880'] = null; }
+  try { __I['CONFIDENCE_TIERS_V1910'] = CONFIDENCE_TIERS_V1910; } catch(e) { __I['CONFIDENCE_TIERS_V1910'] = null; }
+  try { __I['CONFIG'] = CONFIG; } catch(e) { __I['CONFIG'] = null; }
+  try { __I['CONJUNCTIONS'] = CONJUNCTIONS; } catch(e) { __I['CONJUNCTIONS'] = null; }
+  try { __I['CONTEXTUAL_TAA'] = CONTEXTUAL_TAA; } catch(e) { __I['CONTEXTUAL_TAA'] = null; }
+  try { __I['DECADE_NOMINATIVE'] = DECADE_NOMINATIVE; } catch(e) { __I['DECADE_NOMINATIVE'] = null; }
+  try { __I['DECLINABLE_DUAL_DEICTICS_V1880'] = DECLINABLE_DUAL_DEICTICS_V1880; } catch(e) { __I['DECLINABLE_DUAL_DEICTICS_V1880'] = null; }
+  try { __I['DEFAULT_OPTIONS'] = DEFAULT_OPTIONS; } catch(e) { __I['DEFAULT_OPTIONS'] = null; }
+  try { __I['DEFINITE_CLASSES_V1880'] = DEFINITE_CLASSES_V1880; } catch(e) { __I['DEFINITE_CLASSES_V1880'] = null; }
+  try { __I['DEMONSTRATIVES'] = DEMONSTRATIVES; } catch(e) { __I['DEMONSTRATIVES'] = null; }
+  try { __I['DIPTOTE_EXACT'] = DIPTOTE_EXACT; } catch(e) { __I['DIPTOTE_EXACT'] = null; }
+  try { __I['DITRANSITIVE_VERBS_V1880'] = DITRANSITIVE_VERBS_V1880; } catch(e) { __I['DITRANSITIVE_VERBS_V1880'] = null; }
+  try { __I['DUAL_SKIP'] = DUAL_SKIP; } catch(e) { __I['DUAL_SKIP'] = null; }
+  try { __I['EMPHASIS_BASES'] = EMPHASIS_BASES; } catch(e) { __I['EMPHASIS_BASES'] = null; }
+  try { __I['ENCLITICS'] = ENCLITICS; } catch(e) { __I['ENCLITICS'] = null; }
+  try { __I['EXCEPTION_PARTICLES_V1880'] = EXCEPTION_PARTICLES_V1880; } catch(e) { __I['EXCEPTION_PARTICLES_V1880'] = null; }
+  try { __I['EXTERNAL_HOLDOUT_BENCHMARK_V1876'] = EXTERNAL_HOLDOUT_BENCHMARK_V1876; } catch(e) { __I['EXTERNAL_HOLDOUT_BENCHMARK_V1876'] = null; }
+  try { __I['EXTERNAL_HOLDOUT_BENCHMARK_V1877'] = EXTERNAL_HOLDOUT_BENCHMARK_V1877; } catch(e) { __I['EXTERNAL_HOLDOUT_BENCHMARK_V1877'] = null; }
+  try { __I['FAALAIL'] = FAALAIL; } catch(e) { __I['FAALAIL'] = null; }
+  try { __I['FAWAAIL'] = FAWAAIL; } catch(e) { __I['FAWAAIL'] = null; }
+  try { __I['FIVE_NOUN_BY_LEMMA'] = FIVE_NOUN_BY_LEMMA; } catch(e) { __I['FIVE_NOUN_BY_LEMMA'] = null; }
+  try { __I['FIVE_NOUN_FORMS'] = FIVE_NOUN_FORMS; } catch(e) { __I['FIVE_NOUN_FORMS'] = null; }
+  try { __I['FIVE_NOUN_NOM_TO_ACC_V24'] = FIVE_NOUN_NOM_TO_ACC_V24; } catch(e) { __I['FIVE_NOUN_NOM_TO_ACC_V24'] = null; }
+  try { __I['FIVE_NOUN_NOM_TO_OBLIQUE_V24'] = FIVE_NOUN_NOM_TO_OBLIQUE_V24; } catch(e) { __I['FIVE_NOUN_NOM_TO_OBLIQUE_V24'] = null; }
+  try { __I['FIVE_NOUN_STRONG_ROLES'] = FIVE_NOUN_STRONG_ROLES; } catch(e) { __I['FIVE_NOUN_STRONG_ROLES'] = null; }
+  try { __I['FIVE_NOUN_SUFFIX_MAP_V24'] = FIVE_NOUN_SUFFIX_MAP_V24; } catch(e) { __I['FIVE_NOUN_SUFFIX_MAP_V24'] = null; }
+  try { __I['FIVE_VERB_PERSON_CODES'] = FIVE_VERB_PERSON_CODES; } catch(e) { __I['FIVE_VERB_PERSON_CODES'] = null; }
+  try { __I['GOLD_CORPUS'] = GOLD_CORPUS; } catch(e) { __I['GOLD_CORPUS'] = null; }
+  try { __I['GRAMMAR_CLASSES'] = GRAMMAR_CLASSES; } catch(e) { __I['GRAMMAR_CLASSES'] = null; }
+  try { __I['HAMZAT_WASL_INVARIANTS_V1880'] = HAMZAT_WASL_INVARIANTS_V1880; } catch(e) { __I['HAMZAT_WASL_INVARIANTS_V1880'] = null; }
+  try { __I['HAMZAT_WASL_WORDS_V1880'] = HAMZAT_WASL_WORDS_V1880; } catch(e) { __I['HAMZAT_WASL_WORDS_V1880'] = null; }
+  try { __I['HAMZA_FINAL_V1890'] = HAMZA_FINAL_V1890; } catch(e) { __I['HAMZA_FINAL_V1890'] = null; }
+  try { __I['HAMZA_MADD_V1890'] = HAMZA_MADD_V1890; } catch(e) { __I['HAMZA_MADD_V1890'] = null; }
+  try { __I['HAMZA_MEDIAL_V1890'] = HAMZA_MEDIAL_V1890; } catch(e) { __I['HAMZA_MEDIAL_V1890'] = null; }
+  try { __I['HAMZA_MORPHOLOGICAL_FAMILIES'] = HAMZA_MORPHOLOGICAL_FAMILIES; } catch(e) { __I['HAMZA_MORPHOLOGICAL_FAMILIES'] = null; }
+  try { __I['HUMAN_OBJECT_VERBS'] = HUMAN_OBJECT_VERBS; } catch(e) { __I['HUMAN_OBJECT_VERBS'] = null; }
+  try { __I['IDAFA_ADVERBIAL_GOVERNORS'] = IDAFA_ADVERBIAL_GOVERNORS; } catch(e) { __I['IDAFA_ADVERBIAL_GOVERNORS'] = null; }
+  try { __I['INNA_PARTICLES'] = INNA_PARTICLES; } catch(e) { __I['INNA_PARTICLES'] = null; }
+  try { __I['INNA_SISTERS_V1880'] = INNA_SISTERS_V1880; } catch(e) { __I['INNA_SISTERS_V1880'] = null; }
+  try { __I['INTERROGATIVES_V1880'] = INTERROGATIVES_V1880; } catch(e) { __I['INTERROGATIVES_V1880'] = null; }
+  try { __I['JUSSIVE_CONDITIONAL_MARKERS'] = JUSSIVE_CONDITIONAL_MARKERS; } catch(e) { __I['JUSSIVE_CONDITIONAL_MARKERS'] = null; }
+  try { __I['JUSSIVE_PARTICLES'] = JUSSIVE_PARTICLES; } catch(e) { __I['JUSSIVE_PARTICLES'] = null; }
+  try { __I['JUSSIVE_PARTICLES_V1880'] = JUSSIVE_PARTICLES_V1880; } catch(e) { __I['JUSSIVE_PARTICLES_V1880'] = null; }
+  try { __I['KANA_NONSTANDARD_SURFACES'] = KANA_NONSTANDARD_SURFACES; } catch(e) { __I['KANA_NONSTANDARD_SURFACES'] = null; }
+  try { __I['KANA_SISTERS_V1880'] = KANA_SISTERS_V1880; } catch(e) { __I['KANA_SISTERS_V1880'] = null; }
+  try { __I['KANA_SURFACES'] = KANA_SURFACES; } catch(e) { __I['KANA_SURFACES'] = null; }
+  try { __I['KANA_VERBS'] = KANA_VERBS; } catch(e) { __I['KANA_VERBS'] = null; }
+  try { __I['KNOWN_ORTHOGRAPHIC_FORMS'] = KNOWN_ORTHOGRAPHIC_FORMS; } catch(e) { __I['KNOWN_ORTHOGRAPHIC_FORMS'] = null; }
+  try { __I['KNOWN_SURFACES'] = KNOWN_SURFACES; } catch(e) { __I['KNOWN_SURFACES'] = null; }
+  try { __I['LATIN_TO_ARABIC_PUNCT_V1890'] = LATIN_TO_ARABIC_PUNCT_V1890; } catch(e) { __I['LATIN_TO_ARABIC_PUNCT_V1890'] = null; }
+  try { __I['MAFAAEEL'] = MAFAAEEL; } catch(e) { __I['MAFAAEEL'] = null; }
+  try { __I['MAFAAIl'] = MAFAAIl; } catch(e) { __I['MAFAAIl'] = null; }
+  try { __I['MASDARI_MARKERS'] = MASDARI_MARKERS; } catch(e) { __I['MASDARI_MARKERS'] = null; }
+  try { __I['META'] = META; } catch(e) { __I['META'] = null; }
+  try { __I['MUQARABA_NON_SUBJUNCTIVE_V20'] = MUQARABA_NON_SUBJUNCTIVE_V20; } catch(e) { __I['MUQARABA_NON_SUBJUNCTIVE_V20'] = null; }
+  try { __I['NBSP'] = NBSP; } catch(e) { __I['NBSP'] = null; }
+  try { __I['NEGATION'] = NEGATION; } catch(e) { __I['NEGATION'] = null; }
+  try { __I['NONHUMAN_OBJECT_PREFERRED'] = NONHUMAN_OBJECT_PREFERRED; } catch(e) { __I['NONHUMAN_OBJECT_PREFERRED'] = null; }
+  try { __I['NONSTANDARD_FIVE_NOUN_FORMS_V1874'] = NONSTANDARD_FIVE_NOUN_FORMS_V1874; } catch(e) { __I['NONSTANDARD_FIVE_NOUN_FORMS_V1874'] = null; }
+  try { __I['NOUN_FORM_INDEX'] = NOUN_FORM_INDEX; } catch(e) { __I['NOUN_FORM_INDEX'] = null; }
+  try { __I['NOUN_LEMMAS'] = NOUN_LEMMAS; } catch(e) { __I['NOUN_LEMMAS'] = null; }
+  try { __I['NO_FALSE_POSITIVE_CORPUS'] = NO_FALSE_POSITIVE_CORPUS; } catch(e) { __I['NO_FALSE_POSITIVE_CORPUS'] = null; }
+  try { __I['NO_TANWIN_ALIF_TAIL_V1890'] = NO_TANWIN_ALIF_TAIL_V1890; } catch(e) { __I['NO_TANWIN_ALIF_TAIL_V1890'] = null; }
+  try { __I['NUMBER_HUNDREDS'] = NUMBER_HUNDREDS; } catch(e) { __I['NUMBER_HUNDREDS'] = null; }
+  try { __I['NUMBER_UNIT_WORDS'] = NUMBER_UNIT_WORDS; } catch(e) { __I['NUMBER_UNIT_WORDS'] = null; }
+  try { __I['OBJECT_PRONOUN_FEATURES'] = OBJECT_PRONOUN_FEATURES; } catch(e) { __I['OBJECT_PRONOUN_FEATURES'] = null; }
+  try { __I['OBLIGATORY_ANNEXATION_HEADS_V1879'] = OBLIGATORY_ANNEXATION_HEADS_V1879; } catch(e) { __I['OBLIGATORY_ANNEXATION_HEADS_V1879'] = null; }
+  try { __I['PERSONAL_PRONOUNS'] = PERSONAL_PRONOUNS; } catch(e) { __I['PERSONAL_PRONOUNS'] = null; }
+  try { __I['PERSON_FEATURES'] = PERSON_FEATURES; } catch(e) { __I['PERSON_FEATURES'] = null; }
+  try { __I['PERSON_SUFFIXES'] = PERSON_SUFFIXES; } catch(e) { __I['PERSON_SUFFIXES'] = null; }
+  try { __I['PHONETIC_CONFUSABLE_PAIRS_V1880'] = PHONETIC_CONFUSABLE_PAIRS_V1880; } catch(e) { __I['PHONETIC_CONFUSABLE_PAIRS_V1880'] = null; }
+  try { __I['PHRASES'] = PHRASES; } catch(e) { __I['PHRASES'] = null; }
+  try { __I['PHRASE_ROLE_REGRESSION_CORPUS'] = PHRASE_ROLE_REGRESSION_CORPUS; } catch(e) { __I['PHRASE_ROLE_REGRESSION_CORPUS'] = null; }
+  try { __I['PLACE_PROPER_NAMES'] = PLACE_PROPER_NAMES; } catch(e) { __I['PLACE_PROPER_NAMES'] = null; }
+  try { __I['POLARITY_FORMS'] = POLARITY_FORMS; } catch(e) { __I['POLARITY_FORMS'] = null; }
+  try { __I['POS_DEPENDENCY_REGRESSION_CORPUS'] = POS_DEPENDENCY_REGRESSION_CORPUS; } catch(e) { __I['POS_DEPENDENCY_REGRESSION_CORPUS'] = null; }
+  try { __I['PREPOSITIONS'] = PREPOSITIONS; } catch(e) { __I['PREPOSITIONS'] = null; }
+  try { __I['PREPOSITIONS_FULL_V1880'] = PREPOSITIONS_FULL_V1880; } catch(e) { __I['PREPOSITIONS_FULL_V1880'] = null; }
+  try { __I['PRODUCTIVE_ORTHOGRAPHIC_INDEXES'] = PRODUCTIVE_ORTHOGRAPHIC_INDEXES; } catch(e) { __I['PRODUCTIVE_ORTHOGRAPHIC_INDEXES'] = null; }
+  try { __I['PROPER_NAMES'] = PROPER_NAMES; } catch(e) { __I['PROPER_NAMES'] = null; }
+  try { __I['PROTECTED_PATTERNS'] = PROTECTED_PATTERNS; } catch(e) { __I['PROTECTED_PATTERNS'] = null; }
+  try { __I['PROTECTED_WORDS_V1910'] = PROTECTED_WORDS_V1910; } catch(e) { __I['PROTECTED_WORDS_V1910'] = null; }
+  try { __I['RELATIVE_PRONOUNS'] = RELATIVE_PRONOUNS; } catch(e) { __I['RELATIVE_PRONOUNS'] = null; }
+  try { __I['ROLE_CASE'] = ROLE_CASE; } catch(e) { __I['ROLE_CASE'] = null; }
+  try { __I['RULE_PIPELINE'] = RULE_PIPELINE; } catch(e) { __I['RULE_PIPELINE'] = null; }
+  try { __I['SCIENTIFIC_TERMS_V1880'] = SCIENTIFIC_TERMS_V1880; } catch(e) { __I['SCIENTIFIC_TERMS_V1880'] = null; }
+  try { __I['SENTENCE_END_RE'] = SENTENCE_END_RE; } catch(e) { __I['SENTENCE_END_RE'] = null; }
+  try { __I['SEVERITY_V1880'] = SEVERITY_V1880; } catch(e) { __I['SEVERITY_V1880'] = null; }
+  try { __I['SIMPLE_CARDINALS'] = SIMPLE_CARDINALS; } catch(e) { __I['SIMPLE_CARDINALS'] = null; }
+  try { __I['STYLE_PATTERNS_V1890'] = STYLE_PATTERNS_V1890; } catch(e) { __I['STYLE_PATTERNS_V1890'] = null; }
+  try { __I['STYLE_REPEAT_EXCEPTIONS_V1890'] = STYLE_REPEAT_EXCEPTIONS_V1890; } catch(e) { __I['STYLE_REPEAT_EXCEPTIONS_V1890'] = null; }
+  try { __I['SUBJECT_SKIP_ADVERBS'] = SUBJECT_SKIP_ADVERBS; } catch(e) { __I['SUBJECT_SKIP_ADVERBS'] = null; }
+  try { __I['SUBJUNCTIVE_PARTICLES'] = SUBJUNCTIVE_PARTICLES; } catch(e) { __I['SUBJUNCTIVE_PARTICLES'] = null; }
+  try { __I['SUBJUNCTIVE_PARTICLES_V1880'] = SUBJUNCTIVE_PARTICLES_V1880; } catch(e) { __I['SUBJUNCTIVE_PARTICLES_V1880'] = null; }
+  try { __I['SUFFIX_EXPAND_VERBS'] = SUFFIX_EXPAND_VERBS; } catch(e) { __I['SUFFIX_EXPAND_VERBS'] = null; }
+  try { __I['SUGGESTION_KINDS_V1910'] = SUGGESTION_KINDS_V1910; } catch(e) { __I['SUGGESTION_KINDS_V1910'] = null; }
+  try { __I['TANWIN_TO_HARAKA_V1890'] = TANWIN_TO_HARAKA_V1890; } catch(e) { __I['TANWIN_TO_HARAKA_V1890'] = null; }
+  try { __I['TATWEEL'] = TATWEEL; } catch(e) { __I['TATWEEL'] = null; }
+  try { __I['TENS_SURFACES_V1890'] = TENS_SURFACES_V1890; } catch(e) { __I['TENS_SURFACES_V1890'] = null; }
+  try { __I['TOKEN_RE'] = TOKEN_RE; } catch(e) { __I['TOKEN_RE'] = null; }
+  try { __I['V185_GOLD_REGRESSIONS'] = V185_GOLD_REGRESSIONS; } catch(e) { __I['V185_GOLD_REGRESSIONS'] = null; }
+  try { __I['V185_NO_FALSE_POSITIVE_REGRESSIONS'] = V185_NO_FALSE_POSITIVE_REGRESSIONS; } catch(e) { __I['V185_NO_FALSE_POSITIVE_REGRESSIONS'] = null; }
+  try { __I['V186_GOLD_REGRESSIONS'] = V186_GOLD_REGRESSIONS; } catch(e) { __I['V186_GOLD_REGRESSIONS'] = null; }
+  try { __I['V186_NO_FALSE_POSITIVE_REGRESSIONS'] = V186_NO_FALSE_POSITIVE_REGRESSIONS; } catch(e) { __I['V186_NO_FALSE_POSITIVE_REGRESSIONS'] = null; }
+  try { __I['V1871_GOLD_REGRESSIONS'] = V1871_GOLD_REGRESSIONS; } catch(e) { __I['V1871_GOLD_REGRESSIONS'] = null; }
+  try { __I['V1871_NO_FALSE_POSITIVE_REGRESSIONS'] = V1871_NO_FALSE_POSITIVE_REGRESSIONS; } catch(e) { __I['V1871_NO_FALSE_POSITIVE_REGRESSIONS'] = null; }
+  try { __I['V1872_GOLD_REGRESSIONS'] = V1872_GOLD_REGRESSIONS; } catch(e) { __I['V1872_GOLD_REGRESSIONS'] = null; }
+  try { __I['V1872_NO_FALSE_POSITIVE_REGRESSIONS'] = V1872_NO_FALSE_POSITIVE_REGRESSIONS; } catch(e) { __I['V1872_NO_FALSE_POSITIVE_REGRESSIONS'] = null; }
+  try { __I['V1873_COMPETING_ANALYSIS_NO_FALSE_POSITIVE_REGRESSIONS'] = V1873_COMPETING_ANALYSIS_NO_FALSE_POSITIVE_REGRESSIONS; } catch(e) { __I['V1873_COMPETING_ANALYSIS_NO_FALSE_POSITIVE_REGRESSIONS'] = null; }
+  try { __I['V1874_GOLD_REGRESSIONS'] = V1874_GOLD_REGRESSIONS; } catch(e) { __I['V1874_GOLD_REGRESSIONS'] = null; }
+  try { __I['V1874_NO_FALSE_POSITIVE_REGRESSIONS'] = V1874_NO_FALSE_POSITIVE_REGRESSIONS; } catch(e) { __I['V1874_NO_FALSE_POSITIVE_REGRESSIONS'] = null; }
+  try { __I['V1875_GOLD_REGRESSIONS'] = V1875_GOLD_REGRESSIONS; } catch(e) { __I['V1875_GOLD_REGRESSIONS'] = null; }
+  try { __I['V1875_NO_FALSE_POSITIVE_REGRESSIONS'] = V1875_NO_FALSE_POSITIVE_REGRESSIONS; } catch(e) { __I['V1875_NO_FALSE_POSITIVE_REGRESSIONS'] = null; }
+  try { __I['V1876_GOLD_REGRESSIONS'] = V1876_GOLD_REGRESSIONS; } catch(e) { __I['V1876_GOLD_REGRESSIONS'] = null; }
+  try { __I['V1876_NO_FALSE_POSITIVE_REGRESSIONS'] = V1876_NO_FALSE_POSITIVE_REGRESSIONS; } catch(e) { __I['V1876_NO_FALSE_POSITIVE_REGRESSIONS'] = null; }
+  try { __I['V1877_GOLD_REGRESSIONS'] = V1877_GOLD_REGRESSIONS; } catch(e) { __I['V1877_GOLD_REGRESSIONS'] = null; }
+  try { __I['V1877_NO_FALSE_POSITIVE_REGRESSIONS'] = V1877_NO_FALSE_POSITIVE_REGRESSIONS; } catch(e) { __I['V1877_NO_FALSE_POSITIVE_REGRESSIONS'] = null; }
+  try { __I['V1879_GOLD_REGRESSIONS'] = V1879_GOLD_REGRESSIONS; } catch(e) { __I['V1879_GOLD_REGRESSIONS'] = null; }
+  try { __I['V1879_NO_FALSE_POSITIVE_REGRESSIONS'] = V1879_NO_FALSE_POSITIVE_REGRESSIONS; } catch(e) { __I['V1879_NO_FALSE_POSITIVE_REGRESSIONS'] = null; }
+  try { __I['V1880_BLOCK_REGRESSIONS'] = V1880_BLOCK_REGRESSIONS; } catch(e) { __I['V1880_BLOCK_REGRESSIONS'] = null; }
+  try { __I['V1880_GOLD_REGRESSIONS'] = V1880_GOLD_REGRESSIONS; } catch(e) { __I['V1880_GOLD_REGRESSIONS'] = null; }
+  try { __I['V1890_ARABIC_WORD_CHAR'] = V1890_ARABIC_WORD_CHAR; } catch(e) { __I['V1890_ARABIC_WORD_CHAR'] = null; }
+  try { __I['V1890_BLOCK_REGRESSIONS'] = V1890_BLOCK_REGRESSIONS; } catch(e) { __I['V1890_BLOCK_REGRESSIONS'] = null; }
+  try { __I['V1890_GOLD_REGRESSIONS'] = V1890_GOLD_REGRESSIONS; } catch(e) { __I['V1890_GOLD_REGRESSIONS'] = null; }
+  try { __I['V1890_INDECLINABLE_HE_FINAL'] = V1890_INDECLINABLE_HE_FINAL; } catch(e) { __I['V1890_INDECLINABLE_HE_FINAL'] = null; }
+  try { __I['V1890_NUN_FINAL_NOT_DUAL'] = V1890_NUN_FINAL_NOT_DUAL; } catch(e) { __I['V1890_NUN_FINAL_NOT_DUAL'] = null; }
+  try { __I['V1900_BLOCK_REGRESSIONS'] = V1900_BLOCK_REGRESSIONS; } catch(e) { __I['V1900_BLOCK_REGRESSIONS'] = null; }
+  try { __I['V1900_DEMONSTRATIVE_ADJECTIVES'] = V1900_DEMONSTRATIVE_ADJECTIVES; } catch(e) { __I['V1900_DEMONSTRATIVE_ADJECTIVES'] = null; }
+  try { __I['V1900_DEMONSTRATIVE_HEADS'] = V1900_DEMONSTRATIVE_HEADS; } catch(e) { __I['V1900_DEMONSTRATIVE_HEADS'] = null; }
+  try { __I['V1900_EXCLUDED_SUBJECT_ROLES'] = V1900_EXCLUDED_SUBJECT_ROLES; } catch(e) { __I['V1900_EXCLUDED_SUBJECT_ROLES'] = null; }
+  try { __I['V1900_FRAME_LEMMAS'] = V1900_FRAME_LEMMAS; } catch(e) { __I['V1900_FRAME_LEMMAS'] = null; }
+  try { __I['V1900_FRAME_SUBJECTS'] = V1900_FRAME_SUBJECTS; } catch(e) { __I['V1900_FRAME_SUBJECTS'] = null; }
+  try { __I['V1900_GOLD_REGRESSIONS'] = V1900_GOLD_REGRESSIONS; } catch(e) { __I['V1900_GOLD_REGRESSIONS'] = null; }
+  try { __I['V1900_KANA_PREDICATES'] = V1900_KANA_PREDICATES; } catch(e) { __I['V1900_KANA_PREDICATES'] = null; }
+  try { __I['V1900_KANA_SISTERS'] = V1900_KANA_SISTERS; } catch(e) { __I['V1900_KANA_SISTERS'] = null; }
+  try { __I['V1900_KANA_SUBJECTS'] = V1900_KANA_SUBJECTS; } catch(e) { __I['V1900_KANA_SUBJECTS'] = null; }
+  try { __I['V1900_LAYER_IDS'] = V1900_LAYER_IDS; } catch(e) { __I['V1900_LAYER_IDS'] = null; }
+  try { __I['V1900_NOMINATIVE_ENDING_RE'] = V1900_NOMINATIVE_ENDING_RE; } catch(e) { __I['V1900_NOMINATIVE_ENDING_RE'] = null; }
+  try { __I['V1900_NO_TANWIN_ALIF_ENDING'] = V1900_NO_TANWIN_ALIF_ENDING; } catch(e) { __I['V1900_NO_TANWIN_ALIF_ENDING'] = null; }
+  try { __I['V1900_NUMBER_ERRORS'] = V1900_NUMBER_ERRORS; } catch(e) { __I['V1900_NUMBER_ERRORS'] = null; }
+  try { __I['V1900_OBLIQUE_ENDING_RE'] = V1900_OBLIQUE_ENDING_RE; } catch(e) { __I['V1900_OBLIQUE_ENDING_RE'] = null; }
+  try { __I['V1900_ORTHO_PAIRS'] = V1900_ORTHO_PAIRS; } catch(e) { __I['V1900_ORTHO_PAIRS'] = null; }
+  try { __I['V1900_OWN_RULE_RE'] = V1900_OWN_RULE_RE; } catch(e) { __I['V1900_OWN_RULE_RE'] = null; }
+  try { __I['V1900_YAA_FINAL_FIVE_NOUN_RE'] = V1900_YAA_FINAL_FIVE_NOUN_RE; } catch(e) { __I['V1900_YAA_FINAL_FIVE_NOUN_RE'] = null; }
+  try { __I['V1910_AUTO_APPLY_KINDS'] = V1910_AUTO_APPLY_KINDS; } catch(e) { __I['V1910_AUTO_APPLY_KINDS'] = null; }
+  try { __I['V1910_BLOCK_REGRESSIONS'] = V1910_BLOCK_REGRESSIONS; } catch(e) { __I['V1910_BLOCK_REGRESSIONS'] = null; }
+  try { __I['V1910_CONDITIONAL_PARTICLES'] = V1910_CONDITIONAL_PARTICLES; } catch(e) { __I['V1910_CONDITIONAL_PARTICLES'] = null; }
+  try { __I['V1910_EQUIVALENT_RELATIVES'] = V1910_EQUIVALENT_RELATIVES; } catch(e) { __I['V1910_EQUIVALENT_RELATIVES'] = null; }
+  try { __I['V1910_FINAL_HAMZA_NOUNS'] = V1910_FINAL_HAMZA_NOUNS; } catch(e) { __I['V1910_FINAL_HAMZA_NOUNS'] = null; }
+  try { __I['V1910_FIVE_NOUN_PLURALS'] = V1910_FIVE_NOUN_PLURALS; } catch(e) { __I['V1910_FIVE_NOUN_PLURALS'] = null; }
+  try { __I['V1910_FIVE_VERB_ENDINGS'] = V1910_FIVE_VERB_ENDINGS; } catch(e) { __I['V1910_FIVE_VERB_ENDINGS'] = null; }
+  try { __I['V1910_FORMATTING_CLASSES'] = V1910_FORMATTING_CLASSES; } catch(e) { __I['V1910_FORMATTING_CLASSES'] = null; }
+  try { __I['V1910_GOLD_REGRESSIONS'] = V1910_GOLD_REGRESSIONS; } catch(e) { __I['V1910_GOLD_REGRESSIONS'] = null; }
+  try { __I['V1910_GRAMMAR_CLASSES'] = V1910_GRAMMAR_CLASSES; } catch(e) { __I['V1910_GRAMMAR_CLASSES'] = null; }
+  try { __I['V1910_ILLUSTRATIVE_MARKERS'] = V1910_ILLUSTRATIVE_MARKERS; } catch(e) { __I['V1910_ILLUSTRATIVE_MARKERS'] = null; }
+  try { __I['V1910_IMPERFECT_PREFIX'] = V1910_IMPERFECT_PREFIX; } catch(e) { __I['V1910_IMPERFECT_PREFIX'] = null; }
+  try { __I['V1910_INNA_SET'] = V1910_INNA_SET; } catch(e) { __I['V1910_INNA_SET'] = null; }
+  try { __I['V1910_KANA_WITH_BOUND_SUBJECT'] = V1910_KANA_WITH_BOUND_SUBJECT; } catch(e) { __I['V1910_KANA_WITH_BOUND_SUBJECT'] = null; }
+  try { __I['V1910_MAZAL_FORMS'] = V1910_MAZAL_FORMS; } catch(e) { __I['V1910_MAZAL_FORMS'] = null; }
+  try { __I['V1910_MOOD_PARTICLES'] = V1910_MOOD_PARTICLES; } catch(e) { __I['V1910_MOOD_PARTICLES'] = null; }
+  try { __I['V1910_MORPHOLOGY_RULES'] = V1910_MORPHOLOGY_RULES; } catch(e) { __I['V1910_MORPHOLOGY_RULES'] = null; }
+  try { __I['V1910_NONHUMAN_ANIMACIES'] = V1910_NONHUMAN_ANIMACIES; } catch(e) { __I['V1910_NONHUMAN_ANIMACIES'] = null; }
+  try { __I['V1910_NO_TANWIN_ALIF_TAIL'] = V1910_NO_TANWIN_ALIF_TAIL; } catch(e) { __I['V1910_NO_TANWIN_ALIF_TAIL'] = null; }
+  try { __I['V1910_ORTHOGRAPHIC_CLASSES'] = V1910_ORTHOGRAPHIC_CLASSES; } catch(e) { __I['V1910_ORTHOGRAPHIC_CLASSES'] = null; }
+  try { __I['V1910_OVER_CORRECTION_CORPUS'] = V1910_OVER_CORRECTION_CORPUS; } catch(e) { __I['V1910_OVER_CORRECTION_CORPUS'] = null; }
+  try { __I['V1910_PASSIVE_HAMZA_FORMS'] = V1910_PASSIVE_HAMZA_FORMS; } catch(e) { __I['V1910_PASSIVE_HAMZA_FORMS'] = null; }
+  try { __I['V1910_RESUMPTIVE_PRONOUNS'] = V1910_RESUMPTIVE_PRONOUNS; } catch(e) { __I['V1910_RESUMPTIVE_PRONOUNS'] = null; }
+  try { __I['V1920_FASL_PRONOUNS'] = V1920_FASL_PRONOUNS; } catch(e) { __I['V1920_FASL_PRONOUNS'] = null; }
+  try { __I['V1920_IDAFA_OBLIGATORY'] = V1920_IDAFA_OBLIGATORY; } catch(e) { __I['V1920_IDAFA_OBLIGATORY'] = null; }
+  try { __I['V20_BLOCK_REGRESSIONS'] = V20_BLOCK_REGRESSIONS; } catch(e) { __I['V20_BLOCK_REGRESSIONS'] = null; }
+  try { __I['V20_DIACRITIZATION_BLOCK'] = V20_DIACRITIZATION_BLOCK; } catch(e) { __I['V20_DIACRITIZATION_BLOCK'] = null; }
+  try { __I['V20_DIACRITIZATION_GOLD'] = V20_DIACRITIZATION_GOLD; } catch(e) { __I['V20_DIACRITIZATION_GOLD'] = null; }
+  try { __I['V20_FIVE_VERB_DROP'] = V20_FIVE_VERB_DROP; } catch(e) { __I['V20_FIVE_VERB_DROP'] = null; }
+  try { __I['V20_GOLD_REGRESSIONS'] = V20_GOLD_REGRESSIONS; } catch(e) { __I['V20_GOLD_REGRESSIONS'] = null; }
+  try { __I['V20_HARAKA'] = V20_HARAKA; } catch(e) { __I['V20_HARAKA'] = null; }
+  try { __I['V20_INTERVENING_GOVERNORS'] = V20_INTERVENING_GOVERNORS; } catch(e) { __I['V20_INTERVENING_GOVERNORS'] = null; }
+  try { __I['V21_DIVINE_AND_KNOWN_NAMES'] = V21_DIVINE_AND_KNOWN_NAMES; } catch(e) { __I['V21_DIVINE_AND_KNOWN_NAMES'] = null; }
+  try { __I['V23_BLOCK_REGRESSIONS'] = V23_BLOCK_REGRESSIONS; } catch(e) { __I['V23_BLOCK_REGRESSIONS'] = null; }
+  try { __I['V23_GOLD_REGRESSIONS'] = V23_GOLD_REGRESSIONS; } catch(e) { __I['V23_GOLD_REGRESSIONS'] = null; }
+  try { __I['V23_SEMI_BLOCK_REGRESSIONS'] = V23_SEMI_BLOCK_REGRESSIONS; } catch(e) { __I['V23_SEMI_BLOCK_REGRESSIONS'] = null; }
+  try { __I['V23_TIERS'] = V23_TIERS; } catch(e) { __I['V23_TIERS'] = null; }
+  try { __I['V241_BLOCK_REGRESSIONS'] = V241_BLOCK_REGRESSIONS; } catch(e) { __I['V241_BLOCK_REGRESSIONS'] = null; }
+  try { __I['V241_GOLD_REGRESSIONS'] = V241_GOLD_REGRESSIONS; } catch(e) { __I['V241_GOLD_REGRESSIONS'] = null; }
+  try { __I['V241_ORTHOGRAPHY_CORE'] = V241_ORTHOGRAPHY_CORE; } catch(e) { __I['V241_ORTHOGRAPHY_CORE'] = null; }
+  try { __I['V242_BLOCK_REGRESSIONS'] = V242_BLOCK_REGRESSIONS; } catch(e) { __I['V242_BLOCK_REGRESSIONS'] = null; }
+  try { __I['V242_FIXED_PHRASES'] = V242_FIXED_PHRASES; } catch(e) { __I['V242_FIXED_PHRASES'] = null; }
+  try { __I['V242_GOLD_REGRESSIONS'] = V242_GOLD_REGRESSIONS; } catch(e) { __I['V242_GOLD_REGRESSIONS'] = null; }
+  try { __I['V242_ORTHOGRAPHY_CORE'] = V242_ORTHOGRAPHY_CORE; } catch(e) { __I['V242_ORTHOGRAPHY_CORE'] = null; }
+  try { __I['V2431_FALSE_POSITIVE_REGRESSIONS'] = V2431_FALSE_POSITIVE_REGRESSIONS; } catch(e) { __I['V2431_FALSE_POSITIVE_REGRESSIONS'] = null; }
+  try { __I['V2431_GOLD_REGRESSIONS'] = V2431_GOLD_REGRESSIONS; } catch(e) { __I['V2431_GOLD_REGRESSIONS'] = null; }
+  try { __I['V2432_COORDINATORS'] = V2432_COORDINATORS; } catch(e) { __I['V2432_COORDINATORS'] = null; }
+  try { __I['V2432_MATRIX_MARKERS'] = V2432_MATRIX_MARKERS; } catch(e) { __I['V2432_MATRIX_MARKERS'] = null; }
+  try { __I['V2432_ROLE_GRAPH_VERSION'] = V2432_ROLE_GRAPH_VERSION; } catch(e) { __I['V2432_ROLE_GRAPH_VERSION'] = null; }
+  try { __I['V2433_NEW_SUBJECT_CONNECTORS'] = V2433_NEW_SUBJECT_CONNECTORS; } catch(e) { __I['V2433_NEW_SUBJECT_CONNECTORS'] = null; }
+  try { __I['V2433_ROLE_ENGINE'] = V2433_ROLE_ENGINE; } catch(e) { __I['V2433_ROLE_ENGINE'] = null; }
+  try { __I['V2433_SUBJECT_BREAKERS'] = V2433_SUBJECT_BREAKERS; } catch(e) { __I['V2433_SUBJECT_BREAKERS'] = null; }
+  try { __I['V2434_PRONOUN_PERSON'] = V2434_PRONOUN_PERSON; } catch(e) { __I['V2434_PRONOUN_PERSON'] = null; }
+  try { __I['V2434_REVIEWED_ORTHOGRAPHY'] = V2434_REVIEWED_ORTHOGRAPHY; } catch(e) { __I['V2434_REVIEWED_ORTHOGRAPHY'] = null; }
+  try { __I['V243_BLOCK_REGRESSIONS'] = V243_BLOCK_REGRESSIONS; } catch(e) { __I['V243_BLOCK_REGRESSIONS'] = null; }
+  try { __I['V243_CLAUSAL_SUBJECT_VERBS'] = V243_CLAUSAL_SUBJECT_VERBS; } catch(e) { __I['V243_CLAUSAL_SUBJECT_VERBS'] = null; }
+  try { __I['V243_GOLD_REGRESSIONS'] = V243_GOLD_REGRESSIONS; } catch(e) { __I['V243_GOLD_REGRESSIONS'] = null; }
+  try { __I['V243_NON_SUBJUNCTIVE_COMMENCEMENT'] = V243_NON_SUBJUNCTIVE_COMMENCEMENT; } catch(e) { __I['V243_NON_SUBJUNCTIVE_COMMENCEMENT'] = null; }
+  try { __I['V243_PHASE2'] = V243_PHASE2; } catch(e) { __I['V243_PHASE2'] = null; }
+  try { __I['V243_QUANTIFIER_HEADS'] = V243_QUANTIFIER_HEADS; } catch(e) { __I['V243_QUANTIFIER_HEADS'] = null; }
+  try { __I['V243_REVIEWED_ORTHOGRAPHY'] = V243_REVIEWED_ORTHOGRAPHY; } catch(e) { __I['V243_REVIEWED_ORTHOGRAPHY'] = null; }
+  try { __I['V243_SUBJECT_FOLLOWERS'] = V243_SUBJECT_FOLLOWERS; } catch(e) { __I['V243_SUBJECT_FOLLOWERS'] = null; }
+  try { __I['V2443_REVIEWED_ORTHOGRAPHY'] = V2443_REVIEWED_ORTHOGRAPHY; } catch(e) { __I['V2443_REVIEWED_ORTHOGRAPHY'] = null; }
+  try { __I['V245_BLOCK_REGRESSIONS'] = V245_BLOCK_REGRESSIONS; } catch(e) { __I['V245_BLOCK_REGRESSIONS'] = null; }
+  try { __I['V245_CARDINAL_CASE'] = V245_CARDINAL_CASE; } catch(e) { __I['V245_CARDINAL_CASE'] = null; }
+  try { __I['V245_COMPLETENESS_RULES'] = V245_COMPLETENESS_RULES; } catch(e) { __I['V245_COMPLETENESS_RULES'] = null; }
+  try { __I['V245_DITRANSITIVE'] = V245_DITRANSITIVE; } catch(e) { __I['V245_DITRANSITIVE'] = null; }
+  try { __I['V245_GOLD_REGRESSIONS'] = V245_GOLD_REGRESSIONS; } catch(e) { __I['V245_GOLD_REGRESSIONS'] = null; }
+  try { __I['V245_LAM_AMR'] = V245_LAM_AMR; } catch(e) { __I['V245_LAM_AMR'] = null; }
+  try { __I['V245_LAYER_VERSION'] = V245_LAYER_VERSION; } catch(e) { __I['V245_LAYER_VERSION'] = null; }
+  try { __I['V245_LA_NAFIYA'] = V245_LA_NAFIYA; } catch(e) { __I['V245_LA_NAFIYA'] = null; }
+  try { __I['V245_MASADIR_CAUSE'] = V245_MASADIR_CAUSE; } catch(e) { __I['V245_MASADIR_CAUSE'] = null; }
+  try { __I['V245_MA_NON_NOMINAL'] = V245_MA_NON_NOMINAL; } catch(e) { __I['V245_MA_NON_NOMINAL'] = null; }
+  try { __I['V245_NAHYA'] = V245_NAHYA; } catch(e) { __I['V245_NAHYA'] = null; }
+  try { __I['V245_NO_GENDER_BENDING'] = V245_NO_GENDER_BENDING; } catch(e) { __I['V245_NO_GENDER_BENDING'] = null; }
+  try { __I['V245_PASSIVE_STEMS'] = V245_PASSIVE_STEMS; } catch(e) { __I['V245_PASSIVE_STEMS'] = null; }
+  try { __I['V245_PRODUCTION_RULES'] = V245_PRODUCTION_RULES; } catch(e) { __I['V245_PRODUCTION_RULES'] = null; }
+  try { __I['V245_RELATIVE_FORMS'] = V245_RELATIVE_FORMS; } catch(e) { __I['V245_RELATIVE_FORMS'] = null; }
+  try { __I['V245_REVIEWED_PASSIVE_SURFACES'] = V245_REVIEWED_PASSIVE_SURFACES; } catch(e) { __I['V245_REVIEWED_PASSIVE_SURFACES'] = null; }
+  try { __I['V246_HOLDOUT_CONTROLS'] = V246_HOLDOUT_CONTROLS; } catch(e) { __I['V246_HOLDOUT_CONTROLS'] = null; }
+  try { __I['V246_HOLDOUT_ERRORS'] = V246_HOLDOUT_ERRORS; } catch(e) { __I['V246_HOLDOUT_ERRORS'] = null; }
+  try { __I['V246_INTRANSITIVE_VERBS'] = V246_INTRANSITIVE_VERBS; } catch(e) { __I['V246_INTRANSITIVE_VERBS'] = null; }
+  try { __I['V246_LAYER_VERSION'] = V246_LAYER_VERSION; } catch(e) { __I['V246_LAYER_VERSION'] = null; }
+  try { __I['V246_MOOD_GOVERNORS'] = V246_MOOD_GOVERNORS; } catch(e) { __I['V246_MOOD_GOVERNORS'] = null; }
+  try { __I['V246_PERSON_NUMBER_FIVE'] = V246_PERSON_NUMBER_FIVE; } catch(e) { __I['V246_PERSON_NUMBER_FIVE'] = null; }
+  try { __I['V246_REGRESSION_BLOCKS'] = V246_REGRESSION_BLOCKS; } catch(e) { __I['V246_REGRESSION_BLOCKS'] = null; }
+  try { __I['V246_REGRESSION_ERRORS'] = V246_REGRESSION_ERRORS; } catch(e) { __I['V246_REGRESSION_ERRORS'] = null; }
+  try { __I['V246_REVIEWED_ORTHOGRAPHY'] = V246_REVIEWED_ORTHOGRAPHY; } catch(e) { __I['V246_REVIEWED_ORTHOGRAPHY'] = null; }
+  try { __I['V246_REVIEWED_PHRASES'] = V246_REVIEWED_PHRASES; } catch(e) { __I['V246_REVIEWED_PHRASES'] = null; }
+  try { __I['V246_TRANSITIVE_VERBS'] = V246_TRANSITIVE_VERBS; } catch(e) { __I['V246_TRANSITIVE_VERBS'] = null; }
+  try { __I['V24_BENCHMARK_ADDITIONS'] = V24_BENCHMARK_ADDITIONS; } catch(e) { __I['V24_BENCHMARK_ADDITIONS'] = null; }
+  try { __I['V24_SEVERITY_HTML'] = V24_SEVERITY_HTML; } catch(e) { __I['V24_SEVERITY_HTML'] = null; }
+  try { __I['V24_TRANSITIVE_VERBS'] = V24_TRANSITIVE_VERBS; } catch(e) { __I['V24_TRANSITIVE_VERBS'] = null; }
+  try { __I['V25_DHARF_MAKAN'] = V25_DHARF_MAKAN; } catch(e) { __I['V25_DHARF_MAKAN'] = null; }
+  try { __I['V25_DHARF_ZAMAN'] = V25_DHARF_ZAMAN; } catch(e) { __I['V25_DHARF_ZAMAN'] = null; }
+  try { __I['V25_HEART_VERB_STEMS'] = V25_HEART_VERB_STEMS; } catch(e) { __I['V25_HEART_VERB_STEMS'] = null; }
+  try { __I['V25_IFAAL_HAMZA_MASDAR_SKIP'] = V25_IFAAL_HAMZA_MASDAR_SKIP; } catch(e) { __I['V25_IFAAL_HAMZA_MASDAR_SKIP'] = null; }
+  try { __I['V25_ISM_FAIL_STEMS'] = V25_ISM_FAIL_STEMS; } catch(e) { __I['V25_ISM_FAIL_STEMS'] = null; }
+  try { __I['V25_MAFOOL_LI_AJLIH'] = V25_MAFOOL_LI_AJLIH; } catch(e) { __I['V25_MAFOOL_LI_AJLIH'] = null; }
+  try { __I['V25_TAWKID_CORES'] = V25_TAWKID_CORES; } catch(e) { __I['V25_TAWKID_CORES'] = null; }
+  try { __I['VERBAL_CUES'] = VERBAL_CUES; } catch(e) { __I['VERBAL_CUES'] = null; }
+  try { __I['VERBAL_PARTICLES'] = VERBAL_PARTICLES; } catch(e) { __I['VERBAL_PARTICLES'] = null; }
+  try { __I['VERB_FORM_INDEX'] = VERB_FORM_INDEX; } catch(e) { __I['VERB_FORM_INDEX'] = null; }
+  try { __I['VERB_LEXICON'] = VERB_LEXICON; } catch(e) { __I['VERB_LEXICON'] = null; }
+  try { __I['VOCATIVE_PARTICLES_V21'] = VOCATIVE_PARTICLES_V21; } catch(e) { __I['VOCATIVE_PARTICLES_V21'] = null; }
+  try { __I['WAW_IMPERFECT_EXCEPTIONS'] = WAW_IMPERFECT_EXCEPTIONS; } catch(e) { __I['WAW_IMPERFECT_EXCEPTIONS'] = null; }
+  try { __I['WAW_NOUN_EXCEPTIONS'] = WAW_NOUN_EXCEPTIONS; } catch(e) { __I['WAW_NOUN_EXCEPTIONS'] = null; }
+  try { __I['WEAK_NOMINAL_SOURCES_V1880'] = WEAK_NOMINAL_SOURCES_V1880; } catch(e) { __I['WEAK_NOMINAL_SOURCES_V1880'] = null; }
+  try { __I['WORDS'] = WORDS; } catch(e) { __I['WORDS'] = null; }
+  try { __I['WORDS_REVIEW'] = WORDS_REVIEW; } catch(e) { __I['WORDS_REVIEW'] = null; }
+  try { __I['ZANNA_SISTERS_V1880'] = ZANNA_SISTERS_V1880; } catch(e) { __I['ZANNA_SISTERS_V1880'] = null; }
+  try { __I['_AMBIG'] = _AMBIG; } catch(e) { __I['_AMBIG'] = null; }
+  try { __I['_COMMON_SP'] = _COMMON_SP; } catch(e) { __I['_COMMON_SP'] = null; }
+  try { __I['_CONJ'] = _CONJ; } catch(e) { __I['_CONJ'] = null; }
+  try { __I['_DEMS'] = _DEMS; } catch(e) { __I['_DEMS'] = null; }
+  try { __I['_NUMS'] = _NUMS; } catch(e) { __I['_NUMS'] = null; }
+  try { __I['_dN'] = _dN; } catch(e) { __I['_dN'] = null; }
+  try { __I['_innaS'] = _innaS; } catch(e) { __I['_innaS'] = null; }
+  try { __I['_inspectAdj'] = _inspectAdj; } catch(e) { __I['_inspectAdj'] = null; }
+  try { __I['_inspectAgr'] = _inspectAgr; } catch(e) { __I['_inspectAgr'] = null; }
+  try { __I['_inspectCase'] = _inspectCase; } catch(e) { __I['_inspectCase'] = null; }
+  try { __I['_inspectCommon'] = _inspectCommon; } catch(e) { __I['_inspectCommon'] = null; }
+  try { __I['_inspectConf'] = _inspectConf; } catch(e) { __I['_inspectConf'] = null; }
+  try { __I['_inspectCtx'] = _inspectCtx; } catch(e) { __I['_inspectCtx'] = null; }
+  try { __I['_inspectDem'] = _inspectDem; } catch(e) { __I['_inspectDem'] = null; }
+  try { __I['_inspectDeps'] = _inspectDeps; } catch(e) { __I['_inspectDeps'] = null; }
+  try { __I['_inspectLong'] = _inspectLong; } catch(e) { __I['_inspectLong'] = null; }
+  try { __I['_inspectMultiPOS'] = _inspectMultiPOS; } catch(e) { __I['_inspectMultiPOS'] = null; }
+  try { __I['_inspectNaw'] = _inspectNaw; } catch(e) { __I['_inspectNaw'] = null; }
+  try { __I['_inspectNum'] = _inspectNum; } catch(e) { __I['_inspectNum'] = null; }
+  try { __I['_inspectOrth'] = _inspectOrth; } catch(e) { __I['_inspectOrth'] = null; }
+  try { __I['_inspectSem'] = _inspectSem; } catch(e) { __I['_inspectSem'] = null; }
+  try { __I['_inspectVSA'] = _inspectVSA; } catch(e) { __I['_inspectVSA'] = null; }
+  try { __I['_kS'] = _kS; } catch(e) { __I['_kS'] = null; }
+  try { __I['_rAdj'] = _rAdj; } catch(e) { __I['_rAdj'] = null; }
+  try { __I['_rAgr'] = _rAgr; } catch(e) { __I['_rAgr'] = null; }
+  try { __I['_rC'] = _rC; } catch(e) { __I['_rC'] = null; }
+  try { __I['_rCase'] = _rCase; } catch(e) { __I['_rCase'] = null; }
+  try { __I['_rCommon'] = _rCommon; } catch(e) { __I['_rCommon'] = null; }
+  try { __I['_rCtx'] = _rCtx; } catch(e) { __I['_rCtx'] = null; }
+  try { __I['_rD'] = _rD; } catch(e) { __I['_rD'] = null; }
+  try { __I['_rDem'] = _rDem; } catch(e) { __I['_rDem'] = null; }
+  try { __I['_rLong'] = _rLong; } catch(e) { __I['_rLong'] = null; }
+  try { __I['_rN'] = _rN; } catch(e) { __I['_rN'] = null; }
+  try { __I['_rNum'] = _rNum; } catch(e) { __I['_rNum'] = null; }
+  try { __I['_rOrth'] = _rOrth; } catch(e) { __I['_rOrth'] = null; }
+  try { __I['_rPOS'] = _rPOS; } catch(e) { __I['_rPOS'] = null; }
+  try { __I['_rSem'] = _rSem; } catch(e) { __I['_rSem'] = null; }
+  try { __I['_rVSA'] = _rVSA; } catch(e) { __I['_rVSA'] = null; }
+  try { __I['abstentionAssessmentV1880'] = abstentionAssessmentV1880; } catch(e) { __I['abstentionAssessmentV1880'] = null; }
+  try { __I['acceptedConjoinedJussiveInflection'] = acceptedConjoinedJussiveInflection; } catch(e) { __I['acceptedConjoinedJussiveInflection'] = null; }
+  try { __I['acceptedHamzaInflection'] = acceptedHamzaInflection; } catch(e) { __I['acceptedHamzaInflection'] = null; }
+  try { __I['acceptedHamzaVerbForms'] = acceptedHamzaVerbForms; } catch(e) { __I['acceptedHamzaVerbForms'] = null; }
+  try { __I['adjectiveDependents'] = adjectiveDependents; } catch(e) { __I['adjectiveDependents'] = null; }
+  try { __I['adjectiveForm'] = adjectiveForm; } catch(e) { __I['adjectiveForm'] = null; }
+  try { __I['adjectiveShapeMatches'] = adjectiveShapeMatches; } catch(e) { __I['adjectiveShapeMatches'] = null; }
+  try { __I['advancedObjectCandidate'] = advancedObjectCandidate; } catch(e) { __I['advancedObjectCandidate'] = null; }
+  try { __I['advisoryGuardsV1890'] = advisoryGuardsV1890; } catch(e) { __I['advisoryGuardsV1890'] = null; }
+  try { __I['agreementResolverRuleV19'] = agreementResolverRuleV19; } catch(e) { __I['agreementResolverRuleV19'] = null; }
+  try { __I['analyze'] = analyze; } catch(e) { __I['analyze'] = null; }
+  try { __I['analyzeLongV24'] = analyzeLongV24; } catch(e) { __I['analyzeLongV24'] = null; }
+  try { __I['analyzeNestedSentences'] = analyzeNestedSentences; } catch(e) { __I['analyzeNestedSentences'] = null; }
+  try { __I['analyzeNominal'] = analyzeNominal; } catch(e) { __I['analyzeNominal'] = null; }
+  try { __I['analyzeNumberPhrase'] = analyzeNumberPhrase; } catch(e) { __I['analyzeNumberPhrase'] = null; }
+  try { __I['analyzePRO'] = analyzePRO; } catch(e) { __I['analyzePRO'] = null; }
+  try { __I['analyzeToken'] = analyzeToken; } catch(e) { __I['analyzeToken'] = null; }
+  try { __I['analyzeTokens'] = analyzeTokens; } catch(e) { __I['analyzeTokens'] = null; }
+  try { __I['applyDecisionGovernanceV1910'] = applyDecisionGovernanceV1910; } catch(e) { __I['applyDecisionGovernanceV1910'] = null; }
+  try { __I['applyFindings'] = applyFindings; } catch(e) { __I['applyFindings'] = null; }
+  try { __I['applyFirewallV1900'] = applyFirewallV1900; } catch(e) { __I['applyFirewallV1900'] = null; }
+  try { __I['applyV231ProtectionLayerV231'] = applyV231ProtectionLayerV231; } catch(e) { __I['applyV231ProtectionLayerV231'] = null; }
+  try { __I['applyV23GovernanceV23'] = applyV23GovernanceV23; } catch(e) { __I['applyV23GovernanceV23'] = null; }
+  try { __I['applyV2433RoleDecision'] = applyV2433RoleDecision; } catch(e) { __I['applyV2433RoleDecision'] = null; }
+  try { __I['applyV2434FinalSafety'] = applyV2434FinalSafety; } catch(e) { __I['applyV2434FinalSafety'] = null; }
+  try { __I['applyV243GrammarSafety'] = applyV243GrammarSafety; } catch(e) { __I['applyV243GrammarSafety'] = null; }
+  try { __I['applyV243HardenedDecisionGate'] = applyV243HardenedDecisionGate; } catch(e) { __I['applyV243HardenedDecisionGate'] = null; }
+  try { __I['applyV243Phase2DecisionLayer'] = applyV243Phase2DecisionLayer; } catch(e) { __I['applyV243Phase2DecisionLayer'] = null; }
+  try { __I['applyV246DecisionGate'] = applyV246DecisionGate; } catch(e) { __I['applyV246DecisionGate'] = null; }
+  try { __I['applyVerbMood'] = applyVerbMood; } catch(e) { __I['applyVerbMood'] = null; }
+  try { __I['appositionDependents'] = appositionDependents; } catch(e) { __I['appositionDependents'] = null; }
+  try { __I['approximationVerbsRuleV20'] = approximationVerbsRuleV20; } catch(e) { __I['approximationVerbsRuleV20'] = null; }
+  try { __I['assignRole'] = assignRole; } catch(e) { __I['assignRole'] = null; }
+  try { __I['attachGeneratedClitics'] = attachGeneratedClitics; } catch(e) { __I['attachGeneratedClitics'] = null; }
+  try { __I['badalDependentsV24'] = badalDependentsV24; } catch(e) { __I['badalDependentsV24'] = null; }
+  try { __I['bareForCase'] = bareForCase; } catch(e) { __I['bareForCase'] = null; }
+  try { __I['bestAdjective'] = bestAdjective; } catch(e) { __I['bestAdjective'] = null; }
+  try { __I['bestVerb'] = bestVerb; } catch(e) { __I['bestVerb'] = null; }
+  try { __I['boundary'] = boundary; } catch(e) { __I['boundary'] = null; }
+  try { __I['buildClitcPrefix'] = buildClitcPrefix; } catch(e) { __I['buildClitcPrefix'] = null; }
+  try { __I['buildCopularReadingV1910'] = buildCopularReadingV1910; } catch(e) { __I['buildCopularReadingV1910'] = null; }
+  try { __I['buildHtmlV24'] = buildHtmlV24; } catch(e) { __I['buildHtmlV24'] = null; }
+  try { __I['buildKnownOrthographicForms'] = buildKnownOrthographicForms; } catch(e) { __I['buildKnownOrthographicForms'] = null; }
+  try { __I['buildOrthographicVariantIndex'] = buildOrthographicVariantIndex; } catch(e) { __I['buildOrthographicVariantIndex'] = null; }
+  try { __I['buildParseTree'] = buildParseTree; } catch(e) { __I['buildParseTree'] = null; }
+  try { __I['buildSuggestionTracksV1910'] = buildSuggestionTracksV1910; } catch(e) { __I['buildSuggestionTracksV1910'] = null; }
+  try { __I['buildV23TracksV23'] = buildV23TracksV23; } catch(e) { __I['buildV23TracksV23'] = null; }
+  try { __I['buildWebAppHtmlV24'] = buildWebAppHtmlV24; } catch(e) { __I['buildWebAppHtmlV24'] = null; }
+  try { __I['cG'] = cG; } catch(e) { __I['cG'] = null; }
+  try { __I['cameParadigm'] = cameParadigm; } catch(e) { __I['cameParadigm'] = null; }
+  try { __I['candidateSupportedByNominalEvidenceV1880'] = candidateSupportedByNominalEvidenceV1880; } catch(e) { __I['candidateSupportedByNominalEvidenceV1880'] = null; }
+  try { __I['canonicalPrepositionCore'] = canonicalPrepositionCore; } catch(e) { __I['canonicalPrepositionCore'] = null; }
+  try { __I['caseFinding'] = caseFinding; } catch(e) { __I['caseFinding'] = null; }
+  try { __I['caseGovernmentResolverRuleV1874'] = caseGovernmentResolverRuleV1874; } catch(e) { __I['caseGovernmentResolverRuleV1874'] = null; }
+  try { __I['caseLabel'] = caseLabel; } catch(e) { __I['caseLabel'] = null; }
+  try { __I['caseMatches'] = caseMatches; } catch(e) { __I['caseMatches'] = null; }
+  try { __I['classifySuggestionV1910'] = classifySuggestionV1910; } catch(e) { __I['classifySuggestionV1910'] = null; }
+  try { __I['clauseForToken'] = clauseForToken; } catch(e) { __I['clauseForToken'] = null; }
+  try { __I['clauseLocalArgumentBounds'] = clauseLocalArgumentBounds; } catch(e) { __I['clauseLocalArgumentBounds'] = null; }
+  try { __I['clauseOfTokenIndex'] = clauseOfTokenIndex; } catch(e) { __I['clauseOfTokenIndex'] = null; }
+  try { __I['clitizedLexicalOrthographyRule'] = clitizedLexicalOrthographyRule; } catch(e) { __I['clitizedLexicalOrthographyRule'] = null; }
+  try { __I['collectAdvisoriesV1890'] = collectAdvisoriesV1890; } catch(e) { __I['collectAdvisoriesV1890'] = null; }
+  try { __I['commonErrorsRuleV1880'] = commonErrorsRuleV1880; } catch(e) { __I['commonErrorsRuleV1880'] = null; }
+  try { __I['comparativeCaseV20'] = comparativeCaseV20; } catch(e) { __I['comparativeCaseV20'] = null; }
+  try { __I['comparativeHostAndGovV20'] = comparativeHostAndGovV20; } catch(e) { __I['comparativeHostAndGovV20'] = null; }
+  try { __I['comparativeInfoV20'] = comparativeInfoV20; } catch(e) { __I['comparativeInfoV20'] = null; }
+  try { __I['comparativeTanwinRuleV24'] = comparativeTanwinRuleV24; } catch(e) { __I['comparativeTanwinRuleV24'] = null; }
+  try { __I['conditionalGovernmentRule'] = conditionalGovernmentRule; } catch(e) { __I['conditionalGovernmentRule'] = null; }
+  try { __I['confidenceBand'] = confidenceBand; } catch(e) { __I['confidenceBand'] = null; }
+  try { __I['confidenceGradeV1880'] = confidenceGradeV1880; } catch(e) { __I['confidenceGradeV1880'] = null; }
+  try { __I['confidenceTierV1910'] = confidenceTierV1910; } catch(e) { __I['confidenceTierV1910'] = null; }
+  try { __I['confirmedProductiveDualStemV1874'] = confirmedProductiveDualStemV1874; } catch(e) { __I['confirmedProductiveDualStemV1874'] = null; }
+  try { __I['conjugateVerb'] = conjugateVerb; } catch(e) { __I['conjugateVerb'] = null; }
+  try { __I['conjunctionRule'] = conjunctionRule; } catch(e) { __I['conjunctionRule'] = null; }
+  try { __I['contextValidateFinding'] = contextValidateFinding; } catch(e) { __I['contextValidateFinding'] = null; }
+  try { __I['contextualConfidenceV1910'] = contextualConfidenceV1910; } catch(e) { __I['contextualConfidenceV1910'] = null; }
+  try { __I['contextualOrthographyRule'] = contextualOrthographyRule; } catch(e) { __I['contextualOrthographyRule'] = null; }
+  try { __I['contextualPOSDisambiguation'] = contextualPOSDisambiguation; } catch(e) { __I['contextualPOSDisambiguation'] = null; }
+  try { __I['contextualTaaRule'] = contextualTaaRule; } catch(e) { __I['contextualTaaRule'] = null; }
+  try { __I['coordinationAt'] = coordinationAt; } catch(e) { __I['coordinationAt'] = null; }
+  try { __I['countedNounFinding'] = countedNounFinding; } catch(e) { __I['countedNounFinding'] = null; }
+  try { __I['createContext'] = createContext; } catch(e) { __I['createContext'] = null; }
+  try { __I['decadeForm'] = decadeForm; } catch(e) { __I['decadeForm'] = null; }
+  try { __I['dedupe'] = dedupe; } catch(e) { __I['dedupe'] = null; }
+  try { __I['deduplicateFindings'] = deduplicateFindings; } catch(e) { __I['deduplicateFindings'] = null; }
+  try { __I['defectiveWawParadigm'] = defectiveWawParadigm; } catch(e) { __I['defectiveWawParadigm'] = null; }
+  try { __I['defectiveYaParadigm'] = defectiveYaParadigm; } catch(e) { __I['defectiveYaParadigm'] = null; }
+  try { __I['demonstrativeChainCaseRuleV1900'] = demonstrativeChainCaseRuleV1900; } catch(e) { __I['demonstrativeChainCaseRuleV1900'] = null; }
+  try { __I['demonstrativeChainsV1900'] = demonstrativeChainsV1900; } catch(e) { __I['demonstrativeChainsV1900'] = null; }
+  try { __I['demonstrativeDependents'] = demonstrativeDependents; } catch(e) { __I['demonstrativeDependents'] = null; }
+  try { __I['dependencyTreeResolverRuleV19'] = dependencyTreeResolverRuleV19; } catch(e) { __I['dependencyTreeResolverRuleV19'] = null; }
+  try { __I['dependentsRule'] = dependentsRule; } catch(e) { __I['dependentsRule'] = null; }
+  try { __I['desiredPerson'] = desiredPerson; } catch(e) { __I['desiredPerson'] = null; }
+  try { __I['detectCompoundConjunctions'] = detectCompoundConjunctions; } catch(e) { __I['detectCompoundConjunctions'] = null; }
+  try { __I['detectConditionalClause'] = detectConditionalClause; } catch(e) { __I['detectConditionalClause'] = null; }
+  try { __I['detectDiptote'] = detectDiptote; } catch(e) { __I['detectDiptote'] = null; }
+  try { __I['detectMasdariClause'] = detectMasdariClause; } catch(e) { __I['detectMasdariClause'] = null; }
+  try { __I['detectPhrases'] = detectPhrases; } catch(e) { __I['detectPhrases'] = null; }
+  try { __I['dharfMakanCaseRuleV25'] = dharfMakanCaseRuleV25; } catch(e) { __I['dharfMakanCaseRuleV25'] = null; }
+  try { __I['dharfZamanCaseRuleV25'] = dharfZamanCaseRuleV25; } catch(e) { __I['dharfZamanCaseRuleV25'] = null; }
+  try { __I['diacriticEndingV20'] = diacriticEndingV20; } catch(e) { __I['diacriticEndingV20'] = null; }
+  try { __I['diacriticsConflictRuleV20'] = diacriticsConflictRuleV20; } catch(e) { __I['diacriticsConflictRuleV20'] = null; }
+  try { __I['diacriticsRuleV1890'] = diacriticsRuleV1890; } catch(e) { __I['diacriticsRuleV1890'] = null; }
+  try { __I['diacritizeV20'] = diacritizeV20; } catch(e) { __I['diacritizeV20'] = null; }
+  try { __I['diptoteRule'] = diptoteRule; } catch(e) { __I['diptoteRule'] = null; }
+  try { __I['directGovernorCase'] = directGovernorCase; } catch(e) { __I['directGovernorCase'] = null; }
+  try { __I['doubledParadigm'] = doubledParadigm; } catch(e) { __I['doubledParadigm'] = null; }
+  try { __I['eat'] = eat; } catch(e) { __I['eat'] = null; }
+  try { __I['effectiveAgreement'] = effectiveAgreement; } catch(e) { __I['effectiveAgreement'] = null; }
+  try { __I['emphasisDependents'] = emphasisDependents; } catch(e) { __I['emphasisDependents'] = null; }
+  try { __I['entry'] = entry; } catch(e) { __I['entry'] = null; }
+  try { __I['exactKnown'] = exactKnown; } catch(e) { __I['exactKnown'] = null; }
+  try { __I['exceptionRule'] = exceptionRule; } catch(e) { __I['exceptionRule'] = null; }
+  try { __I['expandedAdjectiveLemmas'] = expandedAdjectiveLemmas; } catch(e) { __I['expandedAdjectiveLemmas'] = null; }
+  try { __I['expandedAdjectiveLemmasV187'] = expandedAdjectiveLemmasV187; } catch(e) { __I['expandedAdjectiveLemmasV187'] = null; }
+  try { __I['expandedAdjectiveLemmasV1877'] = expandedAdjectiveLemmasV1877; } catch(e) { __I['expandedAdjectiveLemmasV1877'] = null; }
+  try { __I['expandedAdjectiveLemmasV24'] = expandedAdjectiveLemmasV24; } catch(e) { __I['expandedAdjectiveLemmasV24'] = null; }
+  try { __I['expandedNounLemmas'] = expandedNounLemmas; } catch(e) { __I['expandedNounLemmas'] = null; }
+  try { __I['expandedNounLemmasV187'] = expandedNounLemmasV187; } catch(e) { __I['expandedNounLemmasV187'] = null; }
+  try { __I['expandedNounLemmasV1877'] = expandedNounLemmasV1877; } catch(e) { __I['expandedNounLemmasV1877'] = null; }
+  try { __I['expandedNounLemmasV24'] = expandedNounLemmasV24; } catch(e) { __I['expandedNounLemmasV24'] = null; }
+  try { __I['expandedVerbLexiconV187'] = expandedVerbLexiconV187; } catch(e) { __I['expandedVerbLexiconV187'] = null; }
+  try { __I['expectedCompoundNumber'] = expectedCompoundNumber; } catch(e) { __I['expectedCompoundNumber'] = null; }
+  try { __I['expectedCoordinatedNumber'] = expectedCoordinatedNumber; } catch(e) { __I['expectedCoordinatedNumber'] = null; }
+  try { __I['expectedSimpleNumber'] = expectedSimpleNumber; } catch(e) { __I['expectedSimpleNumber'] = null; }
+  try { __I['extractProtectedSpans'] = extractProtectedSpans; } catch(e) { __I['extractProtectedSpans'] = null; }
+  try { __I['featuresMatch'] = featuresMatch; } catch(e) { __I['featuresMatch'] = null; }
+  try { __I['feminineTanwinRuleV1920'] = feminineTanwinRuleV1920; } catch(e) { __I['feminineTanwinRuleV1920'] = null; }
+  try { __I['findingFromSpan'] = findingFromSpan; } catch(e) { __I['findingFromSpan'] = null; }
+  try { __I['findingFromTextSpan'] = findingFromTextSpan; } catch(e) { __I['findingFromTextSpan'] = null; }
+  try { __I['firewallVetoReasonV1900'] = firewallVetoReasonV1900; } catch(e) { __I['firewallVetoReasonV1900'] = null; }
+  try { __I['fiveNounContextCase'] = fiveNounContextCase; } catch(e) { __I['fiveNounContextCase'] = null; }
+  try { __I['fiveNounHasAddition'] = fiveNounHasAddition; } catch(e) { __I['fiveNounHasAddition'] = null; }
+  try { __I['fiveNounsPhraseResolverRuleV19'] = fiveNounsPhraseResolverRuleV19; } catch(e) { __I['fiveNounsPhraseResolverRuleV19'] = null; }
+  try { __I['fiveNounsRule'] = fiveNounsRule; } catch(e) { __I['fiveNounsRule'] = null; }
+  try { __I['fiveVerbObliqueForm'] = fiveVerbObliqueForm; } catch(e) { __I['fiveVerbObliqueForm'] = null; }
+  try { __I['fiveVerbsProductiveRuleV1910'] = fiveVerbsProductiveRuleV1910; } catch(e) { __I['fiveVerbsProductiveRuleV1910'] = null; }
+  try { __I['fiveVerbsRule'] = fiveVerbsRule; } catch(e) { __I['fiveVerbsRule'] = null; }
+  try { __I['form'] = form; } catch(e) { __I['form'] = null; }
+  try { __I['generateAdjective'] = generateAdjective; } catch(e) { __I['generateAdjective'] = null; }
+  try { __I['generateArabicProBenchmarkV1900'] = generateArabicProBenchmarkV1900; } catch(e) { __I['generateArabicProBenchmarkV1900'] = null; }
+  try { __I['generateArabicProBenchmarkV23'] = generateArabicProBenchmarkV23; } catch(e) { __I['generateArabicProBenchmarkV23'] = null; }
+  try { __I['generateComparativeV20'] = generateComparativeV20; } catch(e) { __I['generateComparativeV20'] = null; }
+  try { __I['generateFiveNoun'] = generateFiveNoun; } catch(e) { __I['generateFiveNoun'] = null; }
+  try { __I['generateMorphology'] = generateMorphology; } catch(e) { __I['generateMorphology'] = null; }
+  try { __I['generateNoun'] = generateNoun; } catch(e) { __I['generateNoun'] = null; }
+  try { __I['generateNumber'] = generateNumber; } catch(e) { __I['generateNumber'] = null; }
+  try { __I['generateParadigm'] = generateParadigm; } catch(e) { __I['generateParadigm'] = null; }
+  try { __I['generateV184GoldCorpus'] = generateV184GoldCorpus; } catch(e) { __I['generateV184GoldCorpus'] = null; }
+  try { __I['generateV184NoFalsePositiveCorpus'] = generateV184NoFalsePositiveCorpus; } catch(e) { __I['generateV184NoFalsePositiveCorpus'] = null; }
+  try { __I['generateV1871GoldCorpus'] = generateV1871GoldCorpus; } catch(e) { __I['generateV1871GoldCorpus'] = null; }
+  try { __I['generateV1871NoFalsePositiveCorpus'] = generateV1871NoFalsePositiveCorpus; } catch(e) { __I['generateV1871NoFalsePositiveCorpus'] = null; }
+  try { __I['generateVerb'] = generateVerb; } catch(e) { __I['generateVerb'] = null; }
+  try { __I['generatedCaseSurface'] = generatedCaseSurface; } catch(e) { __I['generatedCaseSurface'] = null; }
+  try { __I['getVerbFramesV1900'] = getVerbFramesV1900; } catch(e) { __I['getVerbFramesV1900'] = null; }
+  try { __I['governedByPreposition'] = governedByPreposition; } catch(e) { __I['governedByPreposition'] = null; }
+  try { __I['halRule'] = halRule; } catch(e) { __I['halRule'] = null; }
+  try { __I['hamzaCompleteRuleV1890'] = hamzaCompleteRuleV1890; } catch(e) { __I['hamzaCompleteRuleV1890'] = null; }
+  try { __I['hamzaMorphologicalKey'] = hamzaMorphologicalKey; } catch(e) { __I['hamzaMorphologicalKey'] = null; }
+  try { __I['hamzaMorphologicalRule'] = hamzaMorphologicalRule; } catch(e) { __I['hamzaMorphologicalRule'] = null; }
+  try { __I['hamzaVerbSnapshot'] = hamzaVerbSnapshot; } catch(e) { __I['hamzaVerbSnapshot'] = null; }
+  try { __I['hasClausePunctuationBetween'] = hasClausePunctuationBetween; } catch(e) { __I['hasClausePunctuationBetween'] = null; }
+  try { __I['hasNegation'] = hasNegation; } catch(e) { __I['hasNegation'] = null; }
+  try { __I['highConfidenceNumberCandidates'] = highConfidenceNumberCandidates; } catch(e) { __I['highConfidenceNumberCandidates'] = null; }
+  try { __I['hollowParadigm'] = hollowParadigm; } catch(e) { __I['hollowParadigm'] = null; }
+  try { __I['idafaGenitiveCaseRuleV24'] = idafaGenitiveCaseRuleV24; } catch(e) { __I['idafaGenitiveCaseRuleV24'] = null; }
+  try { __I['imperativeSuffix'] = imperativeSuffix; } catch(e) { __I['imperativeSuffix'] = null; }
+  try { __I['imperativeVerb'] = imperativeVerb; } catch(e) { __I['imperativeVerb'] = null; }
+  try { __I['inferSyntacticCase'] = inferSyntacticCase; } catch(e) { __I['inferSyntacticCase'] = null; }
+  try { __I['inflectAdjectiveToken'] = inflectAdjectiveToken; } catch(e) { __I['inflectAdjectiveToken'] = null; }
+  try { __I['inflectCoreCase'] = inflectCoreCase; } catch(e) { __I['inflectCoreCase'] = null; }
+  try { __I['inflectNounNumberToken'] = inflectNounNumberToken; } catch(e) { __I['inflectNounNumberToken'] = null; }
+  try { __I['inflectTokenCase'] = inflectTokenCase; } catch(e) { __I['inflectTokenCase'] = null; }
+  try { __I['inspectDemonstrativeChainsV1900'] = inspectDemonstrativeChainsV1900; } catch(e) { __I['inspectDemonstrativeChainsV1900'] = null; }
+  try { __I['inspectV23GovernanceV23'] = inspectV23GovernanceV23; } catch(e) { __I['inspectV23GovernanceV23'] = null; }
+  try { __I['inspectV243Safety'] = inspectV243Safety; } catch(e) { __I['inspectV243Safety'] = null; }
+  try { __I['inspectVerbFramesV1900'] = inspectVerbFramesV1900; } catch(e) { __I['inspectVerbFramesV1900'] = null; }
+  try { __I['inspectWord'] = inspectWord; } catch(e) { __I['inspectWord'] = null; }
+  try { __I['introducesVerbalPredicateV1920'] = introducesVerbalPredicateV1920; } catch(e) { __I['introducesVerbalPredicateV1920'] = null; }
+  try { __I['isAdjective'] = isAdjective; } catch(e) { __I['isAdjective'] = null; }
+  try { __I['isBareThirdMasculinePast'] = isBareThirdMasculinePast; } catch(e) { __I['isBareThirdMasculinePast'] = null; }
+  try { __I['isCognateAccusativeV1880'] = isCognateAccusativeV1880; } catch(e) { __I['isCognateAccusativeV1880'] = null; }
+  try { __I['isComparativeFormV20'] = isComparativeFormV20; } catch(e) { __I['isComparativeFormV20'] = null; }
+  try { __I['isIdafaHead'] = isIdafaHead; } catch(e) { __I['isIdafaHead'] = null; }
+  try { __I['isImmediateLocalAdjectiveDependent'] = isImmediateLocalAdjectiveDependent; } catch(e) { __I['isImmediateLocalAdjectiveDependent'] = null; }
+  try { __I['isIndeclinableNominalV1880'] = isIndeclinableNominalV1880; } catch(e) { __I['isIndeclinableNominalV1880'] = null; }
+  try { __I['isIndeclinableTargetV20'] = isIndeclinableTargetV20; } catch(e) { __I['isIndeclinableTargetV20'] = null; }
+  try { __I['isKanaSurface'] = isKanaSurface; } catch(e) { __I['isKanaSurface'] = null; }
+  try { __I['isNisbaSubjectCandidate'] = isNisbaSubjectCandidate; } catch(e) { __I['isNisbaSubjectCandidate'] = null; }
+  try { __I['isNominal'] = isNominal; } catch(e) { __I['isNominal'] = null; }
+  try { __I['isNominalOrProperV21'] = isNominalOrProperV21; } catch(e) { __I['isNominalOrProperV21'] = null; }
+  try { __I['isOrthographicInvariantV1880'] = isOrthographicInvariantV1880; } catch(e) { __I['isOrthographicInvariantV1880'] = null; }
+  try { __I['isOvertVerbForm'] = isOvertVerbForm; } catch(e) { __I['isOvertVerbForm'] = null; }
+  try { __I['isPrepositionGovernedToken'] = isPrepositionGovernedToken; } catch(e) { __I['isPrepositionGovernedToken'] = null; }
+  try { __I['isProductiveDefiniteNominalCandidate'] = isProductiveDefiniteNominalCandidate; } catch(e) { __I['isProductiveDefiniteNominalCandidate'] = null; }
+  try { __I['isProtectedLexicalItemV1880'] = isProtectedLexicalItemV1880; } catch(e) { __I['isProtectedLexicalItemV1880'] = null; }
+  try { __I['isProtectedLexicalItemV1890'] = isProtectedLexicalItemV1890; } catch(e) { __I['isProtectedLexicalItemV1890'] = null; }
+  try { __I['isProtectedNormalizedSpan'] = isProtectedNormalizedSpan; } catch(e) { __I['isProtectedNormalizedSpan'] = null; }
+  try { __I['isProtectedOriginalSpan'] = isProtectedOriginalSpan; } catch(e) { __I['isProtectedOriginalSpan'] = null; }
+  try { __I['isReviewedLexicalFormV1890'] = isReviewedLexicalFormV1890; } catch(e) { __I['isReviewedLexicalFormV1890'] = null; }
+  try { __I['isSafeAutoCorrectionV1910'] = isSafeAutoCorrectionV1910; } catch(e) { __I['isSafeAutoCorrectionV1910'] = null; }
+  try { __I['isSafeGrammarPromotionV2423'] = isSafeGrammarPromotionV2423; } catch(e) { __I['isSafeGrammarPromotionV2423'] = null; }
+  try { __I['isSafeGrammarPromotionV243'] = isSafeGrammarPromotionV243; } catch(e) { __I['isSafeGrammarPromotionV243'] = null; }
+  try { __I['isStrongNominalCandidate'] = isStrongNominalCandidate; } catch(e) { __I['isStrongNominalCandidate'] = null; }
+  try { __I['ismFailObjectCaseRuleV25'] = ismFailObjectCaseRuleV25; } catch(e) { __I['ismFailObjectCaseRuleV25'] = null; }
+  try { __I['kanaPredicateCaseRuleV1890'] = kanaPredicateCaseRuleV1890; } catch(e) { __I['kanaPredicateCaseRuleV1890'] = null; }
+  try { __I['kanaPredicateTanwinRuleV1900'] = kanaPredicateTanwinRuleV1900; } catch(e) { __I['kanaPredicateTanwinRuleV1900'] = null; }
+  try { __I['knownCore'] = knownCore; } catch(e) { __I['knownCore'] = null; }
+  try { __I['largeNumberInternalFindings'] = largeNumberInternalFindings; } catch(e) { __I['largeNumberInternalFindings'] = null; }
+  try { __I['longContextResolverRuleV19'] = longContextResolverRuleV19; } catch(e) { __I['longContextResolverRuleV19'] = null; }
+  try { __I['looksLikeFiveNounWithEnclitic'] = looksLikeFiveNounWithEnclitic; } catch(e) { __I['looksLikeFiveNounWithEnclitic'] = null; }
+  try { __I['mafoolLiAjlihRuleV25'] = mafoolLiAjlihRuleV25; } catch(e) { __I['mafoolLiAjlihRuleV25'] = null; }
+  try { __I['mafoolMutlaqCaseRuleV25'] = mafoolMutlaqCaseRuleV25; } catch(e) { __I['mafoolMutlaqCaseRuleV25'] = null; }
+  try { __I['makeTamyizFinding'] = makeTamyizFinding; } catch(e) { __I['makeTamyizFinding'] = null; }
+  try { __I['malformedFiveNounHamzaRuleV1874'] = malformedFiveNounHamzaRuleV1874; } catch(e) { __I['malformedFiveNounHamzaRuleV1874'] = null; }
+  try { __I['mergeOptions'] = mergeOptions; } catch(e) { __I['mergeOptions'] = null; }
+  try { __I['munadaRuleV1890'] = munadaRuleV1890; } catch(e) { __I['munadaRuleV1890'] = null; }
+  try { __I['nG'] = nG; } catch(e) { __I['nG'] = null; }
+  try { __I['nasiyaParadigm'] = nasiyaParadigm; } catch(e) { __I['nasiyaParadigm'] = null; }
+  try { __I['nawasikhCaseRuleV1910'] = nawasikhCaseRuleV1910; } catch(e) { __I['nawasikhCaseRuleV1910'] = null; }
+  try { __I['nextArgumentUnit'] = nextArgumentUnit; } catch(e) { __I['nextArgumentUnit'] = null; }
+  try { __I['nextMatrixNominal'] = nextMatrixNominal; } catch(e) { __I['nextMatrixNominal'] = null; }
+  try { __I['nextNominal'] = nextNominal; } catch(e) { __I['nextNominal'] = null; }
+  try { __I['nextObjectArgument'] = nextObjectArgument; } catch(e) { __I['nextObjectArgument'] = null; }
+  try { __I['nextUngovernedNominal'] = nextUngovernedNominal; } catch(e) { __I['nextUngovernedNominal'] = null; }
+  try { __I['nn'] = nn; } catch(e) { __I['nn'] = null; }
+  try { __I['nominalArgumentUnitEnd'] = nominalArgumentUnitEnd; } catch(e) { __I['nominalArgumentUnitEnd'] = null; }
+  try { __I['nominativeMarkOf'] = nominativeMarkOf; } catch(e) { __I['nominativeMarkOf'] = null; }
+  try { __I['nominativeSubjectCaseRuleV1876'] = nominativeSubjectCaseRuleV1876; } catch(e) { __I['nominativeSubjectCaseRuleV1876'] = null; }
+  try { __I['normalize'] = normalize; } catch(e) { __I['normalize'] = null; }
+  try { __I['normalizeForComparison'] = normalizeForComparison; } catch(e) { __I['normalizeForComparison'] = null; }
+  try { __I['normalizeWithMap'] = normalizeWithMap; } catch(e) { __I['normalizeWithMap'] = null; }
+  try { __I['nounForm'] = nounForm; } catch(e) { __I['nounForm'] = null; }
+  try { __I['numberFromEnding'] = numberFromEnding; } catch(e) { __I['numberFromEnding'] = null; }
+  try { __I['numberGovernance'] = numberGovernance; } catch(e) { __I['numberGovernance'] = null; }
+  try { __I['numberPhraseAtStart'] = numberPhraseAtStart; } catch(e) { __I['numberPhraseAtStart'] = null; }
+  try { __I['numberPhraseCase'] = numberPhraseCase; } catch(e) { __I['numberPhraseCase'] = null; }
+  try { __I['numberRule'] = numberRule; } catch(e) { __I['numberRule'] = null; }
+  try { __I['numberTamyizCompletionRuleV1890'] = numberTamyizCompletionRuleV1890; } catch(e) { __I['numberTamyizCompletionRuleV1890'] = null; }
+  try { __I['objectCaseRule'] = objectCaseRule; } catch(e) { __I['objectCaseRule'] = null; }
+  try { __I['objectClauseEnd'] = objectClauseEnd; } catch(e) { __I['objectClauseEnd'] = null; }
+  try { __I['observedCase'] = observedCase; } catch(e) { __I['observedCase'] = null; }
+  try { __I['oneTwoAgreementFinding'] = oneTwoAgreementFinding; } catch(e) { __I['oneTwoAgreementFinding'] = null; }
+  try { __I['orthographyRule'] = orthographyRule; } catch(e) { __I['orthographyRule'] = null; }
+  try { __I['orthographyStratifiedRuleV19'] = orthographyStratifiedRuleV19; } catch(e) { __I['orthographyStratifiedRuleV19'] = null; }
+  try { __I['overlapsSpan'] = overlapsSpan; } catch(e) { __I['overlapsSpan'] = null; }
+  try { __I['parse'] = parse; } catch(e) { __I['parse'] = null; }
+  try { __I['parseCompoundNumber'] = parseCompoundNumber; } catch(e) { __I['parseCompoundNumber'] = null; }
+  try { __I['parseCoordinatedNumber'] = parseCoordinatedNumber; } catch(e) { __I['parseCoordinatedNumber'] = null; }
+  try { __I['parseLargeNumberPhrase'] = parseLargeNumberPhrase; } catch(e) { __I['parseLargeNumberPhrase'] = null; }
+  try { __I['particleIntroducesVerbClause'] = particleIntroducesVerbClause; } catch(e) { __I['particleIntroducesVerbClause'] = null; }
+  try { __I['partitiveOneTwoFinding'] = partitiveOneTwoFinding; } catch(e) { __I['partitiveOneTwoFinding'] = null; }
+  try { __I['performanceNowV24'] = performanceNowV24; } catch(e) { __I['performanceNowV24'] = null; }
+  try { __I['phraseForToken'] = phraseForToken; } catch(e) { __I['phraseForToken'] = null; }
+  try { __I['pipelineDescription'] = pipelineDescription; } catch(e) { __I['pipelineDescription'] = null; }
+  try { __I['precededByNominalGovernor'] = precededByNominalGovernor; } catch(e) { __I['precededByNominalGovernor'] = null; }
+  try { __I['predicateAgreementFinding'] = predicateAgreementFinding; } catch(e) { __I['predicateAgreementFinding'] = null; }
+  try { __I['previousNominal'] = previousNominal; } catch(e) { __I['previousNominal'] = null; }
+  try { __I['productiveCopularPredicateFinding'] = productiveCopularPredicateFinding; } catch(e) { __I['productiveCopularPredicateFinding'] = null; }
+  try { __I['productiveFinalHamzaV1890'] = productiveFinalHamzaV1890; } catch(e) { __I['productiveFinalHamzaV1890'] = null; }
+  try { __I['productiveHamzaSeat'] = productiveHamzaSeat; } catch(e) { __I['productiveHamzaSeat'] = null; }
+  try { __I['productiveNominalCandidates'] = productiveNominalCandidates; } catch(e) { __I['productiveNominalCandidates'] = null; }
+  try { __I['productiveOrthographyRule'] = productiveOrthographyRule; } catch(e) { __I['productiveOrthographyRule'] = null; }
+  try { __I['protectedWordEntryV1910'] = protectedWordEntryV1910; } catch(e) { __I['protectedWordEntryV1910'] = null; }
+  try { __I['protectionUnlockedV1910'] = protectionUnlockedV1910; } catch(e) { __I['protectionUnlockedV1910'] = null; }
+  try { __I['punctuationCompleteRuleV1890'] = punctuationCompleteRuleV1890; } catch(e) { __I['punctuationCompleteRuleV1890'] = null; }
+  try { __I['punctuationRule'] = punctuationRule; } catch(e) { __I['punctuationRule'] = null; }
+  try { __I['rankAndClassify'] = rankAndClassify; } catch(e) { __I['rankAndClassify'] = null; }
+  try { __I['rebuildToken'] = rebuildToken; } catch(e) { __I['rebuildToken'] = null; }
+  try { __I['recommendDemonstrative'] = recommendDemonstrative; } catch(e) { __I['recommendDemonstrative'] = null; }
+  try { __I['recommendRelativePronoun'] = recommendRelativePronoun; } catch(e) { __I['recommendRelativePronoun'] = null; }
+  try { __I['regularAdjectiveParadigm'] = regularAdjectiveParadigm; } catch(e) { __I['regularAdjectiveParadigm'] = null; }
+  try { __I['relativeAntecedentIndex'] = relativeAntecedentIndex; } catch(e) { __I['relativeAntecedentIndex'] = null; }
+  try { __I['relativeClausesRule'] = relativeClausesRule; } catch(e) { __I['relativeClausesRule'] = null; }
+  try { __I['relativeMatchesCandidate'] = relativeMatchesCandidate; } catch(e) { __I['relativeMatchesCandidate'] = null; }
+  try { __I['replaceFinalVerbVowelWithSukun'] = replaceFinalVerbVowelWithSukun; } catch(e) { __I['replaceFinalVerbVowelWithSukun'] = null; }
+  try { __I['replaceLastHamzaSeat'] = replaceLastHamzaSeat; } catch(e) { __I['replaceLastHamzaSeat'] = null; }
+  try { __I['resolveAdjectiveRelation'] = resolveAdjectiveRelation; } catch(e) { __I['resolveAdjectiveRelation'] = null; }
+  try { __I['resolveConditionalGovernmentV1'] = resolveConditionalGovernmentV1; } catch(e) { __I['resolveConditionalGovernmentV1'] = null; }
+  try { __I['resolveCopularStructure'] = resolveCopularStructure; } catch(e) { __I['resolveCopularStructure'] = null; }
+  try { __I['resolveHamzaMorphologyV1'] = resolveHamzaMorphologyV1; } catch(e) { __I['resolveHamzaMorphologyV1'] = null; }
+  try { __I['resolveNounRoles'] = resolveNounRoles; } catch(e) { __I['resolveNounRoles'] = null; }
+  try { __I['resolveObjectV1'] = resolveObjectV1; } catch(e) { __I['resolveObjectV1'] = null; }
+  try { __I['resolveSubject'] = resolveSubject; } catch(e) { __I['resolveSubject'] = null; }
+  try { __I['resolveSubjectV2'] = resolveSubjectV2; } catch(e) { __I['resolveSubjectV2'] = null; }
+  try { __I['resolvedRelativeFeatures'] = resolvedRelativeFeatures; } catch(e) { __I['resolvedRelativeFeatures'] = null; }
+  try { __I['resumesMatrixNominalPredicate'] = resumesMatrixNominalPredicate; } catch(e) { __I['resumesMatrixNominalPredicate'] = null; }
+  try { __I['roleExpectedCase'] = roleExpectedCase; } catch(e) { __I['roleExpectedCase'] = null; }
+  try { __I['runArabicProBenchmarkV1900'] = runArabicProBenchmarkV1900; } catch(e) { __I['runArabicProBenchmarkV1900'] = null; }
+  try { __I['runArabicProBenchmarkV23'] = runArabicProBenchmarkV23; } catch(e) { __I['runArabicProBenchmarkV23'] = null; }
+  try { __I['runDiacritizationSuiteV20'] = runDiacritizationSuiteV20; } catch(e) { __I['runDiacritizationSuiteV20'] = null; }
+  try { __I['runExternalHoldoutBenchmark'] = runExternalHoldoutBenchmark; } catch(e) { __I['runExternalHoldoutBenchmark'] = null; }
+  try { __I['runFullSuiteV1890'] = runFullSuiteV1890; } catch(e) { __I['runFullSuiteV1890'] = null; }
+  try { __I['runFullSuiteV1900'] = runFullSuiteV1900; } catch(e) { __I['runFullSuiteV1900'] = null; }
+  try { __I['runFullSuiteV1910'] = runFullSuiteV1910; } catch(e) { __I['runFullSuiteV1910'] = null; }
+  try { __I['runFullSuiteV20'] = runFullSuiteV20; } catch(e) { __I['runFullSuiteV20'] = null; }
+  try { __I['runFullSuiteV23'] = runFullSuiteV23; } catch(e) { __I['runFullSuiteV23'] = null; }
+  try { __I['runFullSuiteV246'] = runFullSuiteV246; } catch(e) { __I['runFullSuiteV246'] = null; }
+  try { __I['runLargeExternalBenchmark'] = runLargeExternalBenchmark; } catch(e) { __I['runLargeExternalBenchmark'] = null; }
+  try { __I['runOverCorrectionBenchmarkV1910'] = runOverCorrectionBenchmarkV1910; } catch(e) { __I['runOverCorrectionBenchmarkV1910'] = null; }
+  try { __I['runPROApiSanityChecks'] = runPROApiSanityChecks; } catch(e) { __I['runPROApiSanityChecks'] = null; }
+  try { __I['runRegressionSuiteV1880'] = runRegressionSuiteV1880; } catch(e) { __I['runRegressionSuiteV1880'] = null; }
+  try { __I['runRegressionSuiteV1890'] = runRegressionSuiteV1890; } catch(e) { __I['runRegressionSuiteV1890'] = null; }
+  try { __I['runRegressionSuiteV1900'] = runRegressionSuiteV1900; } catch(e) { __I['runRegressionSuiteV1900'] = null; }
+  try { __I['runRegressionSuiteV1910'] = runRegressionSuiteV1910; } catch(e) { __I['runRegressionSuiteV1910'] = null; }
+  try { __I['runRegressionSuiteV20'] = runRegressionSuiteV20; } catch(e) { __I['runRegressionSuiteV20'] = null; }
+  try { __I['runRegressionSuiteV23'] = runRegressionSuiteV23; } catch(e) { __I['runRegressionSuiteV23'] = null; }
+  try { __I['runRegressionSuiteV241'] = runRegressionSuiteV241; } catch(e) { __I['runRegressionSuiteV241'] = null; }
+  try { __I['runRegressionSuiteV242'] = runRegressionSuiteV242; } catch(e) { __I['runRegressionSuiteV242'] = null; }
+  try { __I['runRegressionSuiteV243'] = runRegressionSuiteV243; } catch(e) { __I['runRegressionSuiteV243'] = null; }
+  try { __I['runRegressionSuiteV2431'] = runRegressionSuiteV2431; } catch(e) { __I['runRegressionSuiteV2431'] = null; }
+  try { __I['runRegressionSuiteV245'] = runRegressionSuiteV245; } catch(e) { __I['runRegressionSuiteV245'] = null; }
+  try { __I['runRegressionSuiteV246'] = runRegressionSuiteV246; } catch(e) { __I['runRegressionSuiteV246'] = null; }
+  try { __I['runV245GrammarCompleteness'] = runV245GrammarCompleteness; } catch(e) { __I['runV245GrammarCompleteness'] = null; }
+  try { __I['runV245ProductionCompleteness'] = runV245ProductionCompleteness; } catch(e) { __I['runV245ProductionCompleteness'] = null; }
+  try { __I['runV246HoldoutBenchmark'] = runV246HoldoutBenchmark; } catch(e) { __I['runV246HoldoutBenchmark'] = null; }
+  try { __I['runV246RecallLayer'] = runV246RecallLayer; } catch(e) { __I['runV246RecallLayer'] = null; }
+  try { __I['runV24AdditionBenchmarkV24'] = runV24AdditionBenchmarkV24; } catch(e) { __I['runV24AdditionBenchmarkV24'] = null; }
+  try { __I['sameMultiset'] = sameMultiset; } catch(e) { __I['sameMultiset'] = null; }
+  try { __I['scalePhrase'] = scalePhrase; } catch(e) { __I['scalePhrase'] = null; }
+  try { __I['sentenceBounds'] = sentenceBounds; } catch(e) { __I['sentenceBounds'] = null; }
+  try { __I['sentenceGroups'] = sentenceGroups; } catch(e) { __I['sentenceGroups'] = null; }
+  try { __I['severityForFindingV1880'] = severityForFindingV1880; } catch(e) { __I['severityForFindingV1880'] = null; }
+  try { __I['sg'] = sg; } catch(e) { __I['sg'] = null; }
+  try { __I['simpleCardinal'] = simpleCardinal; } catch(e) { __I['simpleCardinal'] = null; }
+  try { __I['simplePolarityFinding'] = simplePolarityFinding; } catch(e) { __I['simplePolarityFinding'] = null; }
+  try { __I['soundFemininePluralCaseMarkerRule'] = soundFemininePluralCaseMarkerRule; } catch(e) { __I['soundFemininePluralCaseMarkerRule'] = null; }
+  try { __I['soundParadigm'] = soundParadigm; } catch(e) { __I['soundParadigm'] = null; }
+  try { __I['spacingRuleV1880'] = spacingRuleV1880; } catch(e) { __I['spacingRuleV1880'] = null; }
+  try { __I['speechParticipantObjectFrame'] = speechParticipantObjectFrame; } catch(e) { __I['speechParticipantObjectFrame'] = null; }
+  try { __I['spellBelowHundred'] = spellBelowHundred; } catch(e) { __I['spellBelowHundred'] = null; }
+  try { __I['spellBelowThousand'] = spellBelowThousand; } catch(e) { __I['spellBelowThousand'] = null; }
+  try { __I['splitClitics'] = splitClitics; } catch(e) { __I['splitClitics'] = null; }
+  try { __I['statistics'] = statistics; } catch(e) { __I['statistics'] = null; }
+  try { __I['stripDiacritics'] = stripDiacritics; } catch(e) { __I['stripDiacritics'] = null; }
+  try { __I['structuralCase'] = structuralCase; } catch(e) { __I['structuralCase'] = null; }
+  try { __I['styleRuleV1890'] = styleRuleV1890; } catch(e) { __I['styleRuleV1890'] = null; }
+  try { __I['syntaxCaseFinding'] = syntaxCaseFinding; } catch(e) { __I['syntaxCaseFinding'] = null; }
+  try { __I['syntaxContextRule'] = syntaxContextRule; } catch(e) { __I['syntaxContextRule'] = null; }
+  try { __I['taajjubInfoV21'] = taajjubInfoV21; } catch(e) { __I['taajjubInfoV21'] = null; }
+  try { __I['take'] = take; } catch(e) { __I['take'] = null; }
+  try { __I['tamyizRule'] = tamyizRule; } catch(e) { __I['tamyizRule'] = null; }
+  try { __I['tawkidMaanawiCaseRuleV25'] = tawkidMaanawiCaseRuleV25; } catch(e) { __I['tawkidMaanawiCaseRuleV25'] = null; }
+  try { __I['toOriginalSpan'] = toOriginalSpan; } catch(e) { __I['toOriginalSpan'] = null; }
+  try { __I['tokenAtOriginalSpan'] = tokenAtOriginalSpan; } catch(e) { __I['tokenAtOriginalSpan'] = null; }
+  try { __I['tokenFeatures'] = tokenFeatures; } catch(e) { __I['tokenFeatures'] = null; }
+  try { __I['tokenHasEncliticV1890'] = tokenHasEncliticV1890; } catch(e) { __I['tokenHasEncliticV1890'] = null; }
+  try { __I['tokenIsKnownNameV21'] = tokenIsKnownNameV21; } catch(e) { __I['tokenIsKnownNameV21'] = null; }
+  try { __I['tokenize'] = tokenize; } catch(e) { __I['tokenize'] = null; }
+  try { __I['transitiveObjectCaseRuleV24'] = transitiveObjectCaseRuleV24; } catch(e) { __I['transitiveObjectCaseRuleV24'] = null; }
+  try { __I['trimProtectedMatch'] = trimProtectedMatch; } catch(e) { __I['trimProtectedMatch'] = null; }
+  try { __I['uniqueOrthographicCandidate'] = uniqueOrthographicCandidate; } catch(e) { __I['uniqueOrthographicCandidate'] = null; }
+  try { __I['unvocalizedNominalVariants'] = unvocalizedNominalVariants; } catch(e) { __I['unvocalizedNominalVariants'] = null; }
+  try { __I['uq'] = uq; } catch(e) { __I['uq'] = null; }
+  try { __I['v1900Bare'] = v1900Bare; } catch(e) { __I['v1900Bare'] = null; }
+  try { __I['v1900ChainMemberIndex'] = v1900ChainMemberIndex; } catch(e) { __I['v1900ChainMemberIndex'] = null; }
+  try { __I['v1900ConjugatedReplacement'] = v1900ConjugatedReplacement; } catch(e) { __I['v1900ConjugatedReplacement'] = null; }
+  try { __I['v1900CopularFallback'] = v1900CopularFallback; } catch(e) { __I['v1900CopularFallback'] = null; }
+  try { __I['v1900EndingKind'] = v1900EndingKind; } catch(e) { __I['v1900EndingKind'] = null; }
+  try { __I['v1900Fill'] = v1900Fill; } catch(e) { __I['v1900Fill'] = null; }
+  try { __I['v1900FlipDirection'] = v1900FlipDirection; } catch(e) { __I['v1900FlipDirection'] = null; }
+  try { __I['v1900GovernorMoodAt'] = v1900GovernorMoodAt; } catch(e) { __I['v1900GovernorMoodAt'] = null; }
+  try { __I['v1900PersonCodeFor'] = v1900PersonCodeFor; } catch(e) { __I['v1900PersonCodeFor'] = null; }
+  try { __I['v1900PostverbalOvertSubject'] = v1900PostverbalOvertSubject; } catch(e) { __I['v1900PostverbalOvertSubject'] = null; }
+  try { __I['v1900PreverbalOvertSubject'] = v1900PreverbalOvertSubject; } catch(e) { __I['v1900PreverbalOvertSubject'] = null; }
+  try { __I['v1910CanFillNominalSlot'] = v1910CanFillNominalSlot; } catch(e) { __I['v1910CanFillNominalSlot'] = null; }
+  try { __I['v1910GuardReason'] = v1910GuardReason; } catch(e) { __I['v1910GuardReason'] = null; }
+  try { __I['v1910InsideIllustrativeQuoteV1910'] = v1910InsideIllustrativeQuoteV1910; } catch(e) { __I['v1910InsideIllustrativeQuoteV1910'] = null; }
+  try { __I['v1910InterventionKind'] = v1910InterventionKind; } catch(e) { __I['v1910InterventionKind'] = null; }
+  try { __I['v1910KanaHasBoundSubject'] = v1910KanaHasBoundSubject; } catch(e) { __I['v1910KanaHasBoundSubject'] = null; }
+  try { __I['v1910MarkFor'] = v1910MarkFor; } catch(e) { __I['v1910MarkFor'] = null; }
+  try { __I['v1910MissegmentedPreposition'] = v1910MissegmentedPreposition; } catch(e) { __I['v1910MissegmentedPreposition'] = null; }
+  try { __I['v1910ProposedCase'] = v1910ProposedCase; } catch(e) { __I['v1910ProposedCase'] = null; }
+  try { __I['v20SingleHaraka'] = v20SingleHaraka; } catch(e) { __I['v20SingleHaraka'] = null; }
+  try { __I['v20TanwinHaraka'] = v20TanwinHaraka; } catch(e) { __I['v20TanwinHaraka'] = null; }
+  try { __I['v231VetoComparativeIdafa'] = v231VetoComparativeIdafa; } catch(e) { __I['v231VetoComparativeIdafa'] = null; }
+  try { __I['v231VetoObjectEnclitic'] = v231VetoObjectEnclitic; } catch(e) { __I['v231VetoObjectEnclitic'] = null; }
+  try { __I['v231VetoWaslImperative'] = v231VetoWaslImperative; } catch(e) { __I['v231VetoWaslImperative'] = null; }
+  try { __I['v23Core'] = v23Core; } catch(e) { __I['v23Core'] = null; }
+  try { __I['v23FindTokenAt'] = v23FindTokenAt; } catch(e) { __I['v23FindTokenAt'] = null; }
+  try { __I['v23Pos'] = v23Pos; } catch(e) { __I['v23Pos'] = null; }
+  try { __I['v23TierFor'] = v23TierFor; } catch(e) { __I['v23TierFor'] = null; }
+  try { __I['v23VetoAttachedPronounObject'] = v23VetoAttachedPronounObject; } catch(e) { __I['v23VetoAttachedPronounObject'] = null; }
+  try { __I['v23VetoImperative'] = v23VetoImperative; } catch(e) { __I['v23VetoImperative'] = null; }
+  try { __I['v23VetoKanaPredicate'] = v23VetoKanaPredicate; } catch(e) { __I['v23VetoKanaPredicate'] = null; }
+  try { __I['v23VetoMasdarEnclitic'] = v23VetoMasdarEnclitic; } catch(e) { __I['v23VetoMasdarEnclitic'] = null; }
+  try { __I['v23VetoMoodConflict'] = v23VetoMoodConflict; } catch(e) { __I['v23VetoMoodConflict'] = null; }
+  try { __I['v23VetoPrepositionPronoun'] = v23VetoPrepositionPronoun; } catch(e) { __I['v23VetoPrepositionPronoun'] = null; }
+  try { __I['v241ApplySafetyLayer'] = v241ApplySafetyLayer; } catch(e) { __I['v241ApplySafetyLayer'] = null; }
+  try { __I['v241HasExplicitPassivePattern'] = v241HasExplicitPassivePattern; } catch(e) { __I['v241HasExplicitPassivePattern'] = null; }
+  try { __I['v241IdafaEvidenceGuard'] = v241IdafaEvidenceGuard; } catch(e) { __I['v241IdafaEvidenceGuard'] = null; }
+  try { __I['v241InnaClauseAgreement'] = v241InnaClauseAgreement; } catch(e) { __I['v241InnaClauseAgreement'] = null; }
+  try { __I['v241IsRelativePronoun'] = v241IsRelativePronoun; } catch(e) { __I['v241IsRelativePronoun'] = null; }
+  try { __I['v241RelativeClauseObjectCliticGuard'] = v241RelativeClauseObjectCliticGuard; } catch(e) { __I['v241RelativeClauseObjectCliticGuard'] = null; }
+  try { __I['v241SupplementFindings'] = v241SupplementFindings; } catch(e) { __I['v241SupplementFindings'] = null; }
+  try { __I['v242SupplementFindings'] = v242SupplementFindings; } catch(e) { __I['v242SupplementFindings'] = null; }
+  try { __I['v2432BuildRoleGraph'] = v2432BuildRoleGraph; } catch(e) { __I['v2432BuildRoleGraph'] = null; }
+  try { __I['v2432ClauseKind'] = v2432ClauseKind; } catch(e) { __I['v2432ClauseKind'] = null; }
+  try { __I['v2432NearestNominalLeft'] = v2432NearestNominalLeft; } catch(e) { __I['v2432NearestNominalLeft'] = null; }
+  try { __I['v2432NominalUnit'] = v2432NominalUnit; } catch(e) { __I['v2432NominalUnit'] = null; }
+  try { __I['v2432RoleBasedAgreementRecall'] = v2432RoleBasedAgreementRecall; } catch(e) { __I['v2432RoleBasedAgreementRecall'] = null; }
+  try { __I['v2432SameSentence'] = v2432SameSentence; } catch(e) { __I['v2432SameSentence'] = null; }
+  try { __I['v2432SurfaceNominalFeatures'] = v2432SurfaceNominalFeatures; } catch(e) { __I['v2432SurfaceNominalFeatures'] = null; }
+  try { __I['v2433BuildRoleGraph'] = v2433BuildRoleGraph; } catch(e) { __I['v2433BuildRoleGraph'] = null; }
+  try { __I['v2433ClauseFor'] = v2433ClauseFor; } catch(e) { __I['v2433ClauseFor'] = null; }
+  try { __I['v2433Core'] = v2433Core; } catch(e) { __I['v2433Core'] = null; }
+  try { __I['v2433HasLocalExplicitSubject'] = v2433HasLocalExplicitSubject; } catch(e) { __I['v2433HasLocalExplicitSubject'] = null; }
+  try { __I['v2433IsConnector'] = v2433IsConnector; } catch(e) { __I['v2433IsConnector'] = null; }
+  try { __I['v2433LegacyStructuralVeto'] = v2433LegacyStructuralVeto; } catch(e) { __I['v2433LegacyStructuralVeto'] = null; }
+  try { __I['v2433RelativeSubjectRecall'] = v2433RelativeSubjectRecall; } catch(e) { __I['v2433RelativeSubjectRecall'] = null; }
+  try { __I['v2433RoleEvidenceFor'] = v2433RoleEvidenceFor; } catch(e) { __I['v2433RoleEvidenceFor'] = null; }
+  try { __I['v2433SafeRoleRecall'] = v2433SafeRoleRecall; } catch(e) { __I['v2433SafeRoleRecall'] = null; }
+  try { __I['v2433SameClause'] = v2433SameClause; } catch(e) { __I['v2433SameClause'] = null; }
+  try { __I['v2433ValidateSubjectFinding'] = v2433ValidateSubjectFinding; } catch(e) { __I['v2433ValidateSubjectFinding'] = null; }
+  try { __I['v2434Core'] = v2434Core; } catch(e) { __I['v2434Core'] = null; }
+  try { __I['v2434ExpectedVerbPerson'] = v2434ExpectedVerbPerson; } catch(e) { __I['v2434ExpectedVerbPerson'] = null; }
+  try { __I['v2434PersonCode'] = v2434PersonCode; } catch(e) { __I['v2434PersonCode'] = null; }
+  try { __I['v2434PronounAgreementRecall'] = v2434PronounAgreementRecall; } catch(e) { __I['v2434PronounAgreementRecall'] = null; }
+  try { __I['v2434PronounPerson'] = v2434PronounPerson; } catch(e) { __I['v2434PronounPerson'] = null; }
+  try { __I['v2434ReviewedOrthographyRecall'] = v2434ReviewedOrthographyRecall; } catch(e) { __I['v2434ReviewedOrthographyRecall'] = null; }
+  try { __I['v243AgreementAlreadyValid'] = v243AgreementAlreadyValid; } catch(e) { __I['v243AgreementAlreadyValid'] = null; }
+  try { __I['v243CaseSafetyVeto'] = v243CaseSafetyVeto; } catch(e) { __I['v243CaseSafetyVeto'] = null; }
+  try { __I['v243ContextIntegrityV12'] = v243ContextIntegrityV12; } catch(e) { __I['v243ContextIntegrityV12'] = null; }
+  try { __I['v243ContextualAdjectiveRecall'] = v243ContextualAdjectiveRecall; } catch(e) { __I['v243ContextualAdjectiveRecall'] = null; }
+  try { __I['v243ContextualSubjectContinuityRecall'] = v243ContextualSubjectContinuityRecall; } catch(e) { __I['v243ContextualSubjectContinuityRecall'] = null; }
+  try { __I['v243ExplicitClauseSubjectRecall'] = v243ExplicitClauseSubjectRecall; } catch(e) { __I['v243ExplicitClauseSubjectRecall'] = null; }
+  try { __I['v243FallbackPostverbalSubject'] = v243FallbackPostverbalSubject; } catch(e) { __I['v243FallbackPostverbalSubject'] = null; }
+  try { __I['v243HardenedLocalGrammarGuard'] = v243HardenedLocalGrammarGuard; } catch(e) { __I['v243HardenedLocalGrammarGuard'] = null; }
+  try { __I['v243HasLocalExplicitSubjectAfterVerb'] = v243HasLocalExplicitSubjectAfterVerb; } catch(e) { __I['v243HasLocalExplicitSubjectAfterVerb'] = null; }
+  try { __I['v243ImmediateSubjectAfterVerb'] = v243ImmediateSubjectAfterVerb; } catch(e) { __I['v243ImmediateSubjectAfterVerb'] = null; }
+  try { __I['v243JussiveMoodFindings'] = v243JussiveMoodFindings; } catch(e) { __I['v243JussiveMoodFindings'] = null; }
+  try { __I['v243Phase2ClauseInfo'] = v243Phase2ClauseInfo; } catch(e) { __I['v243Phase2ClauseInfo'] = null; }
+  try { __I['v243Phase2IsGrammarFinding'] = v243Phase2IsGrammarFinding; } catch(e) { __I['v243Phase2IsGrammarFinding'] = null; }
+  try { __I['v243Phase2SVOAgreementRecall'] = v243Phase2SVOAgreementRecall; } catch(e) { __I['v243Phase2SVOAgreementRecall'] = null; }
+  try { __I['v243Phase2ScoreFinding'] = v243Phase2ScoreFinding; } catch(e) { __I['v243Phase2ScoreFinding'] = null; }
+  try { __I['v243PredicateFalsePositiveGuard'] = v243PredicateFalsePositiveGuard; } catch(e) { __I['v243PredicateFalsePositiveGuard'] = null; }
+  try { __I['v243PreverbalSubject'] = v243PreverbalSubject; } catch(e) { __I['v243PreverbalSubject'] = null; }
+  try { __I['v243QuantifierSubjectEvidence'] = v243QuantifierSubjectEvidence; } catch(e) { __I['v243QuantifierSubjectEvidence'] = null; }
+  try { __I['v243SafeAutoDecision'] = v243SafeAutoDecision; } catch(e) { __I['v243SafeAutoDecision'] = null; }
+  try { __I['v243SubjectRelation'] = v243SubjectRelation; } catch(e) { __I['v243SubjectRelation'] = null; }
+  try { __I['v243SupplementOrthography'] = v243SupplementOrthography; } catch(e) { __I['v243SupplementOrthography'] = null; }
+  try { __I['v243SupplementSubjectCase'] = v243SupplementSubjectCase; } catch(e) { __I['v243SupplementSubjectCase'] = null; }
+  try { __I['v243SurfaceFeatures'] = v243SurfaceFeatures; } catch(e) { __I['v243SurfaceFeatures'] = null; }
+  try { __I['v243WawPluralRecall'] = v243WawPluralRecall; } catch(e) { __I['v243WawPluralRecall'] = null; }
+  try { __I['v2443AgreementFixes'] = v2443AgreementFixes; } catch(e) { __I['v2443AgreementFixes'] = null; }
+  try { __I['v2443Core'] = v2443Core; } catch(e) { __I['v2443Core'] = null; }
+  try { __I['v2443FinalWrongCorrectionVeto'] = v2443FinalWrongCorrectionVeto; } catch(e) { __I['v2443FinalWrongCorrectionVeto'] = null; }
+  try { __I['v2443MafoolMutlaqSafety'] = v2443MafoolMutlaqSafety; } catch(e) { __I['v2443MafoolMutlaqSafety'] = null; }
+  try { __I['v2443Next'] = v2443Next; } catch(e) { __I['v2443Next'] = null; }
+  try { __I['v2443OrthographyRecall'] = v2443OrthographyRecall; } catch(e) { __I['v2443OrthographyRecall'] = null; }
+  try { __I['v2443Surface'] = v2443Surface; } catch(e) { __I['v2443Surface'] = null; }
+  try { __I['v2443TokenFinding'] = v2443TokenFinding; } catch(e) { __I['v2443TokenFinding'] = null; }
+  try { __I['v2443WordIs'] = v2443WordIs; } catch(e) { __I['v2443WordIs'] = null; }
+  try { __I['v244HasOvertObjectAfter'] = v244HasOvertObjectAfter; } catch(e) { __I['v244HasOvertObjectAfter'] = null; }
+  try { __I['v244IsTransitiveLemma'] = v244IsTransitiveLemma; } catch(e) { __I['v244IsTransitiveLemma'] = null; }
+  try { __I['v245BadalAndConjunctionCompletenessRule'] = v245BadalAndConjunctionCompletenessRule; } catch(e) { __I['v245BadalAndConjunctionCompletenessRule'] = null; }
+  try { __I['v245CaseFinding'] = v245CaseFinding; } catch(e) { __I['v245CaseFinding'] = null; }
+  try { __I['v245Core'] = v245Core; } catch(e) { __I['v245Core'] = null; }
+  try { __I['v245DitransitiveRule'] = v245DitransitiveRule; } catch(e) { __I['v245DitransitiveRule'] = null; }
+  try { __I['v245EllipsisAndDashRule'] = v245EllipsisAndDashRule; } catch(e) { __I['v245EllipsisAndDashRule'] = null; }
+  try { __I['v245FinalProductionRecall'] = v245FinalProductionRecall; } catch(e) { __I['v245FinalProductionRecall'] = null; }
+  try { __I['v245IsWord'] = v245IsWord; } catch(e) { __I['v245IsWord'] = null; }
+  try { __I['v245JussiveCompletenessRule'] = v245JussiveCompletenessRule; } catch(e) { __I['v245JussiveCompletenessRule'] = null; }
+  try { __I['v245JussiveReplacement'] = v245JussiveReplacement; } catch(e) { __I['v245JussiveReplacement'] = null; }
+  try { __I['v245LaNafyaLilJinsRule'] = v245LaNafyaLilJinsRule; } catch(e) { __I['v245LaNafyaLilJinsRule'] = null; }
+  try { __I['v245LooksPassive'] = v245LooksPassive; } catch(e) { __I['v245LooksPassive'] = null; }
+  try { __I['v245MaDisambiguationGuardRule'] = v245MaDisambiguationGuardRule; } catch(e) { __I['v245MaDisambiguationGuardRule'] = null; }
+  try { __I['v245MafoolLiAjlihCompletenessRule'] = v245MafoolLiAjlihCompletenessRule; } catch(e) { __I['v245MafoolLiAjlihCompletenessRule'] = null; }
+  try { __I['v245MafoolMaahRule'] = v245MafoolMaahRule; } catch(e) { __I['v245MafoolMaahRule'] = null; }
+  try { __I['v245MoodFinding'] = v245MoodFinding; } catch(e) { __I['v245MoodFinding'] = null; }
+  try { __I['v245NextWord'] = v245NextWord; } catch(e) { __I['v245NextWord'] = null; }
+  try { __I['v245Nominal'] = v245Nominal; } catch(e) { __I['v245Nominal'] = null; }
+  try { __I['v245NumberCompletenessRule'] = v245NumberCompletenessRule; } catch(e) { __I['v245NumberCompletenessRule'] = null; }
+  try { __I['v245PassiveNaibFaelRule'] = v245PassiveNaibFaelRule; } catch(e) { __I['v245PassiveNaibFaelRule'] = null; }
+  try { __I['v245PrevWord'] = v245PrevWord; } catch(e) { __I['v245PrevWord'] = null; }
+  try { __I['v245ProdSpan'] = v245ProdSpan; } catch(e) { __I['v245ProdSpan'] = null; }
+  try { __I['v245ProdWordRule'] = v245ProdWordRule; } catch(e) { __I['v245ProdWordRule'] = null; }
+  try { __I['v245PunctuationCompletenessRule'] = v245PunctuationCompletenessRule; } catch(e) { __I['v245PunctuationCompletenessRule'] = null; }
+  try { __I['v245PunctuationSemanticSuggestionsRule'] = v245PunctuationSemanticSuggestionsRule; } catch(e) { __I['v245PunctuationSemanticSuggestionsRule'] = null; }
+  try { __I['v245RelativeAgreementCompletenessRule'] = v245RelativeAgreementCompletenessRule; } catch(e) { __I['v245RelativeAgreementCompletenessRule'] = null; }
+  try { __I['v245ReviewedPassiveRule'] = v245ReviewedPassiveRule; } catch(e) { __I['v245ReviewedPassiveRule'] = null; }
+  try { __I['v245SentenceBreakBetween'] = v245SentenceBreakBetween; } catch(e) { __I['v245SentenceBreakBetween'] = null; }
+  try { __I['v245Surface'] = v245Surface; } catch(e) { __I['v245Surface'] = null; }
+  try { __I['v245TaajjubCompletenessRule'] = v245TaajjubCompletenessRule; } catch(e) { __I['v245TaajjubCompletenessRule'] = null; }
+  try { __I['v245WordAfter'] = v245WordAfter; } catch(e) { __I['v245WordAfter'] = null; }
+  try { __I['v245WordBefore'] = v245WordBefore; } catch(e) { __I['v245WordBefore'] = null; }
+  try { __I['v246Add'] = v246Add; } catch(e) { __I['v246Add'] = null; }
+  try { __I['v246Core'] = v246Core; } catch(e) { __I['v246Core'] = null; }
+  try { __I['v246Finding'] = v246Finding; } catch(e) { __I['v246Finding'] = null; }
+  try { __I['v246HasProtected'] = v246HasProtected; } catch(e) { __I['v246HasProtected'] = null; }
+  try { __I['v246NextWord'] = v246NextWord; } catch(e) { __I['v246NextWord'] = null; }
+  try { __I['v246PrevWord'] = v246PrevWord; } catch(e) { __I['v246PrevWord'] = null; }
+  try { __I['v246RecallByText'] = v246RecallByText; } catch(e) { __I['v246RecallByText'] = null; }
+  try { __I['v246SameClause'] = v246SameClause; } catch(e) { __I['v246SameClause'] = null; }
+  try { __I['v246Surface'] = v246Surface; } catch(e) { __I['v246Surface'] = null; }
+  try { __I['v246TerminalArbitration'] = v246TerminalArbitration; } catch(e) { __I['v246TerminalArbitration'] = null; }
+  try { __I['v24EscapeHtmlV24'] = v24EscapeHtmlV24; } catch(e) { __I['v24EscapeHtmlV24'] = null; }
+  try { __I['v25HasAttachedHeartSubjectV24'] = v25HasAttachedHeartSubjectV24; } catch(e) { __I['v25HasAttachedHeartSubjectV24'] = null; }
+  try { __I['v25IsHeartVerbCoreV24'] = v25IsHeartVerbCoreV24; } catch(e) { __I['v25IsHeartVerbCoreV24'] = null; }
+  try { __I['v25IsmFailStemOfV24'] = v25IsmFailStemOfV24; } catch(e) { __I['v25IsmFailStemOfV24'] = null; }
+  try { __I['v25TawkidCaseV24'] = v25TawkidCaseV24; } catch(e) { __I['v25TawkidCaseV24'] = null; }
+  try { __I['v25VerbBeforeDharfV24'] = v25VerbBeforeDharfV24; } catch(e) { __I['v25VerbBeforeDharfV24'] = null; }
+  try { __I['vA'] = vA; } catch(e) { __I['vA'] = null; }
+  try { __I['vG'] = vG; } catch(e) { __I['vG'] = null; }
+  try { __I['validate'] = validate; } catch(e) { __I['validate'] = null; }
+  try { __I['validateAndRerankFindings'] = validateAndRerankFindings; } catch(e) { __I['validateAndRerankFindings'] = null; }
+  try { __I['validateData'] = validateData; } catch(e) { __I['validateData'] = null; }
+  try { __I['verbAnalyses'] = verbAnalyses; } catch(e) { __I['verbAnalyses'] = null; }
+  try { __I['verbBeforeOwner'] = verbBeforeOwner; } catch(e) { __I['verbBeforeOwner'] = null; }
+  try { __I['verbMoodInContext'] = verbMoodInContext; } catch(e) { __I['verbMoodInContext'] = null; }
+  try { __I['verbSubjectFrameRuleV1900'] = verbSubjectFrameRuleV1900; } catch(e) { __I['verbSubjectFrameRuleV1900'] = null; }
+  try { __I['visibleCase'] = visibleCase; } catch(e) { __I['visibleCase'] = null; }
+  try { __I['vocalizeTokenV20'] = vocalizeTokenV20; } catch(e) { __I['vocalizeTokenV20'] = null; }
+  try { __I['vocativeInfoV21'] = vocativeInfoV21; } catch(e) { __I['vocativeInfoV21'] = null; }
+  try { __I['vowelStrength'] = vowelStrength; } catch(e) { __I['vowelStrength'] = null; }
+  try { __I['wawAljamaaCompletionRuleV1910'] = wawAljamaaCompletionRuleV1910; } catch(e) { __I['wawAljamaaCompletionRuleV1910'] = null; }
+  try { __I['wawAljamaaRule'] = wawAljamaaRule; } catch(e) { __I['wawAljamaaRule'] = null; }
+  try { __I['weakNominalEvidenceV1880'] = weakNominalEvidenceV1880; } catch(e) { __I['weakNominalEvidenceV1880'] = null; }
+  try { __I['weakVerbAgreementRule'] = weakVerbAgreementRule; } catch(e) { __I['weakVerbAgreementRule'] = null; }
+  try { __I['weakVerbStats'] = weakVerbStats; } catch(e) { __I['weakVerbStats'] = null; }
+  try { __I['withCaseMark'] = withCaseMark; } catch(e) { __I['withCaseMark'] = null; }
+  try { __I['wordSpanAtV1890'] = wordSpanAtV1890; } catch(e) { __I['wordSpanAtV1890'] = null; }
+  try { __I['zannaObjectCaseRuleV24'] = zannaObjectCaseRuleV24; } catch(e) { __I['zannaObjectCaseRuleV24'] = null; }
+  try { __I['zannaSecondObjectCaseRuleV25'] = zannaSecondObjectCaseRuleV25; } catch(e) { __I['zannaSecondObjectCaseRuleV25'] = null; }
+  try { ArabicProofreaderV18.__internals = __I; } catch(e) { globalThis.__I = __I; }
+
+return ArabicProofreaderV18;
 });
